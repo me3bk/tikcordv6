@@ -1,0 +1,21 @@
+{
+  "name": "tikcord-reborn-enhanced",
+  "version": "3.1.0",
+  "description": "Multi-platform Discord bot with maximum quality downloads - Refactored Edition",
+  "main": "src/bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/bot.js",
+    "start:dev": "node --expose-gc src/bot.js",
+    "test": "node src/utils/healthCheck.js"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.6.1",
+    "form-data": "^4.0.4"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
