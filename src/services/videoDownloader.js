@@ -21,6 +21,23 @@ class VideoDownloader {
   constructor() {
     this.tempDir = CONFIG.PATHS.TEMP_DIR;
     this.ensureTempDir();
+    this.permanentErrorPatterns = [
+      'http error 403',
+      'http error 404',
+      '404 not found',
+      '410 gone',
+      '410:',
+      'private video',
+      'video unavailable',
+      'not available in your country',
+      'sign in to confirm your age',
+      'playback on other websites has been disabled',
+      'this live event has ended',
+      'copyright claim',
+      'account is private',
+      'video does not exist',
+      'user not found'
+    ];
   }
 
   /**
@@ -67,7 +84,7 @@ class VideoDownloader {
         url,
         '--dump-json',
         '--no-warnings',
-        '--socket-timeout', '15',
+        '--socket-timeout', '30',
         '--impersonate', impersonateTarget
       ];
       
@@ -80,7 +97,7 @@ class VideoDownloader {
       
       const { stdout } = await promiseTimeout(
         execFileAsync('yt-dlp', args, {
-          maxBuffer: 5 * 1024 * 1024
+          maxBuffer: 10 * 1024 * 1024
         }),
         CONFIG.DOWNLOAD.INFO_TIMEOUT,
         'Video info retrieval timed out'
@@ -163,6 +180,7 @@ class VideoDownloader {
       ];
       
       // Execute yt-dlp
+      let lastYtDlpError = '';
       const ytDlp = execFile('yt-dlp', args, {
         timeout: CONFIG.DOWNLOAD.TIMEOUT,
         maxBuffer: CONFIG.DOWNLOAD.MAX_BUFFER_SIZE
@@ -184,17 +202,30 @@ class VideoDownloader {
       
       // Log errors but don't fail
       ytDlp.stderr.on('data', (data) => {
-        const error = data.toString();
-        if (error.includes('ERROR')) {
-          logger.error(`[${tag}] yt-dlp error:`, { error });
+        const errorText = data.toString();
+        const trimmed = errorText.trim();
+        if (trimmed) {
+          lastYtDlpError = trimmed;
+        }
+        if (errorText.includes('ERROR')) {
+          logger.error(`[${tag}] yt-dlp error:`, { error: trimmed || errorText });
         }
       });
       
       // Wait for completion
       await new Promise((resolve, reject) => {
         ytDlp.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`yt-dlp exited with code ${code}`));
+          if (code === 0) {
+            resolve();
+          } else {
+            const message = this.buildYtDlpErrorMessage(code, lastYtDlpError);
+            const err = new Error(message);
+            if (this.isPermanentYtDlpError(lastYtDlpError)) {
+              err.isPermanent = true;
+            }
+            err.rawOutput = lastYtDlpError;
+            reject(err);
+          }
         });
         ytDlp.on('error', reject);
       });
@@ -302,14 +333,16 @@ class VideoDownloader {
       '--format', formatString,
       '--no-warnings',
       '--no-playlist',
-      '--socket-timeout', '30',
-      '--retries', '5',
-      '--fragment-retries', '10',
+      '--socket-timeout', '60',
+      '--retries', '10',
+      '--fragment-retries', '20',
       '--impersonate', impersonateTarget,
       '--add-header', 'Accept:*/*',
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--merge-output-format', 'mp4',
-      '--concurrent-fragments', platform === 'snapchat' ? '3' : '8'
+      '--concurrent-fragments', platform === 'snapchat' ? '3' : '16',
+      '--buffer-size', '16K',
+      '--no-part'
     ];
     
     // Platform-specific arguments
@@ -334,8 +367,8 @@ class VideoDownloader {
         baseArgs.push(
           '--http-chunk-size', '5M',
           '--retries', '10',
-          '--fragment-retries', '15',
-          '--socket-timeout', '60',
+          '--fragment-retries', '25',
+          '--socket-timeout', '90',
           '--geo-bypass',
           '--no-check-certificates'
         );
@@ -434,8 +467,9 @@ class VideoDownloader {
       throw new Error('TikTok API returned invalid response');
       
     } catch (error) {
-      logger.error(`[${tag}] TikTok API fallback failed:`, { error: error.message });
-      throw error;
+      const apiError = this.normalizeApiError(error, 'TikTok API fallback failed');
+      logger.error(`[${tag}] TikTok API fallback failed:`, { error: apiError.message });
+      throw apiError;
     }
   }
 
@@ -521,8 +555,9 @@ class VideoDownloader {
       throw new Error('Instagram API returned invalid data structure');
       
     } catch (error) {
-      logger.error(`[${tag}] Instagram API fallback failed:`, { error: error.message });
-      throw error;
+      const apiError = this.normalizeApiError(error, 'Instagram API fallback failed');
+      logger.error(`[${tag}] Instagram API fallback failed:`, { error: apiError.message });
+      throw apiError;
     }
   }
 
@@ -608,6 +643,30 @@ class VideoDownloader {
       logger.error('❌ yt-dlp update failed:', { error: error.message });
       return false;
     }
+  }
+
+  buildYtDlpErrorMessage(code, lastError = '') {
+    if (lastError) {
+      return `yt-dlp exited with code ${code}: ${lastError}`;
+    }
+    return `yt-dlp exited with code ${code}`;
+  }
+
+  isPermanentYtDlpError(output = '') {
+    if (!output) return false;
+    const lower = output.toLowerCase();
+    return this.permanentErrorPatterns.some(pattern => lower.includes(pattern));
+  }
+
+  normalizeApiError(error, prefix = 'API error') {
+    const status = error?.response?.status;
+    const statusText = status ? `status ${status}` : null;
+    const pieces = [prefix, statusText, error?.message].filter(Boolean);
+    const normalized = new Error(pieces.join(' - '));
+    if (status && [400, 401, 403, 404, 410, 451].includes(status)) {
+      normalized.isPermanent = true;
+    }
+    return normalized;
   }
 }
 

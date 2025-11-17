@@ -2,6 +2,7 @@
 const EventEmitter = require('events');
 const { CONFIG } = require('../config');
 const logger = require('../utils/logger');
+const persistenceService = require('./persistenceService');
 
 class DownloadManager extends EventEmitter {
   constructor() {
@@ -11,6 +12,9 @@ class DownloadManager extends EventEmitter {
     this.queueProcessor = Promise.resolve();
     this.isProcessing = false;
     this.stats = this.initializeStats();
+    this.pausedForRecovery = false;
+    this.persistenceEnabled = persistenceService.isReady();
+    this.bootstrapFromPersistence();
     
     // Set max listeners to prevent warnings
     this.setMaxListeners(CONFIG.DOWNLOAD.MAX_CONCURRENT + 10);
@@ -28,6 +32,68 @@ class DownloadManager extends EventEmitter {
     };
   }
 
+  bootstrapFromPersistence() {
+    if (!this.persistenceEnabled) {
+      return;
+    }
+
+    try {
+      const pendingItems = persistenceService.loadPendingItems();
+      const filteredItems = pendingItems.filter(item => item.retryCount < CONFIG.DOWNLOAD.MAX_RETRIES);
+      const dropped = pendingItems.length - filteredItems.length;
+      
+      if (filteredItems.length > 0) {
+        this.queue.push(...filteredItems);
+        this.pausedForRecovery = true;
+        logger.info(`Loaded ${filteredItems.length} queued download(s) from persistence`);
+      }
+      
+      if (dropped > 0) {
+        logger.warn(`Dropped ${dropped} persisted download(s) that exceeded retry limit`);
+      }
+
+      const summary = persistenceService.getStatsSummary();
+      this.stats.totalDownloads = summary.totalDownloads;
+      this.stats.successfulDownloads = summary.successfulDownloads;
+      this.stats.failedDownloads = summary.failedDownloads;
+      this.stats.totalBytes = summary.totalBytes;
+      this.stats.byPlatform = summary.byPlatform;
+    } catch (error) {
+      logger.error('Failed to bootstrap persistence state:', { error: error.message });
+    }
+  }
+
+  async resumeFromPersistence(client) {
+    if (!this.pausedForRecovery) {
+      return;
+    }
+
+    await this.rehydrateMessages(client);
+    this.pausedForRecovery = false;
+    this.processQueue();
+  }
+
+  async rehydrateMessages(client) {
+    const unresolved = this.queue.filter(
+      (item) => !item.message && item.channelId && item.messageId
+    );
+
+    for (const item of unresolved) {
+      try {
+        const channel = await client.channels.fetch(item.channelId);
+        if (!channel) throw new Error('Channel not found');
+        const message = await channel.messages.fetch(item.messageId);
+        item.message = message;
+      } catch (error) {
+        logger.warn(`[${item.tag}] Unable to rehydrate status message: ${error.message}`);
+        this.queue = this.queue.filter((entry) => entry.tag !== item.tag);
+        if (this.persistenceEnabled) {
+          persistenceService.markFailed(item.tag, 'Status message missing after restart');
+        }
+      }
+    }
+  }
+
   /**
    * Add a download to the queue
    * @param {Object} downloadInfo - Download information
@@ -40,17 +106,23 @@ class DownloadManager extends EventEmitter {
     }
 
     const tag = this.generateTag();
+    const messageId = downloadInfo.message?.id || downloadInfo.messageId || null;
     const queueItem = {
       ...downloadInfo,
       tag,
       addedAt: Date.now(),
       status: 'queued',
       retryCount: 0,
-      authorId: downloadInfo.authorId // Ensure authorId is preserved
+      authorId: downloadInfo.authorId, // Ensure authorId is preserved
+      messageId
     };
 
     this.queue.push(queueItem);
     logger.info(`[${tag}] Added to queue (${this.queue.length}/${CONFIG.DOWNLOAD.MAX_QUEUE_SIZE})`);
+
+    if (this.persistenceEnabled) {
+      persistenceService.saveQueueItem(queueItem);
+    }
     
     this.emit('queue:added', queueItem);
     this.processQueue();
@@ -62,7 +134,7 @@ class DownloadManager extends EventEmitter {
    * Process the download queue
    */
   async processQueue() {
-    if (this.isProcessing) return;
+    if (this.pausedForRecovery || this.isProcessing) return;
     
     this.isProcessing = true;
     
@@ -89,6 +161,20 @@ class DownloadManager extends EventEmitter {
    */
   async startDownload(item) {
     const { tag, authorId } = item;
+
+    if (!item.message) {
+      logger.warn(`[${tag}] Missing Discord message reference, skipping download`);
+      this.stats.failedDownloads++;
+      if (!this.stats.byPlatform[item.platform]) {
+        this.stats.byPlatform[item.platform] = { total: 0, success: 0, failed: 0 };
+      }
+      this.stats.byPlatform[item.platform].failed++;
+      if (this.persistenceEnabled) {
+        persistenceService.markFailed(tag, 'Missing Discord message reference');
+      }
+      this.processQueue();
+      return;
+    }
     
     this.activeDownloads.set(tag, {
       ...item,
@@ -96,6 +182,10 @@ class DownloadManager extends EventEmitter {
       status: 'downloading',
       authorId: authorId // Keep authorId in active downloads
     });
+    
+    if (this.persistenceEnabled) {
+      persistenceService.markAsActive(tag);
+    }
 
     this.emit('download:start', item);
     
@@ -132,6 +222,10 @@ class DownloadManager extends EventEmitter {
       this.stats.byPlatform[download.platform].success++;
     }
 
+    if (this.persistenceEnabled) {
+      persistenceService.markCompleted(tag, result.size);
+    }
+
     this.activeDownloads.delete(tag);
     this.emit('download:complete', { ...download, result });
     
@@ -153,6 +247,10 @@ class DownloadManager extends EventEmitter {
       item.authorId = authorId; // Preserve authorId for retry
       logger.warn(`[${tag}] Retrying download (attempt ${item.retryCount}/${CONFIG.DOWNLOAD.MAX_RETRIES})`);
       
+      if (this.persistenceEnabled) {
+        persistenceService.updateRetryCount(tag, item.retryCount);
+      }
+      
       // Re-add to queue with exponential backoff
       setTimeout(() => {
         this.queue.unshift(item);
@@ -165,6 +263,10 @@ class DownloadManager extends EventEmitter {
         this.stats.byPlatform[item.platform].failed++;
       }
       
+      if (this.persistenceEnabled) {
+        persistenceService.markFailed(tag, error.message);
+      }
+
       this.activeDownloads.delete(tag);
       this.emit('download:error', { ...item, error });
       
@@ -179,16 +281,43 @@ class DownloadManager extends EventEmitter {
    * @returns {boolean} Whether the error is retryable
    */
   isRetryableError(error) {
-    const nonRetryableErrors = [
-      'Unsupported URL',
-      'Private video',
-      'removed',
+    if (!error) return true;
+    
+    if (error.isPermanent) {
+      return false;
+    }
+    
+    const sources = [
+      error.message?.toLowerCase() || '',
+      error.rawOutput?.toLowerCase() || ''
+    ].filter(Boolean);
+    
+    if (sources.length === 0) {
+      return true;
+    }
+    
+    const nonRetryablePatterns = [
+      'unsupported url',
+      'private video',
+      'video unavailable',
+      'video is unavailable',
       'not available',
-      'Invalid URL'
+      'not found',
+      '404',
+      '403',
+      '410',
+      'removed',
+      'no longer available',
+      'forbidden',
+      'suspended',
+      'copyright',
+      'account is private',
+      'user not found',
+      'invalid url'
     ];
     
-    return !nonRetryableErrors.some(msg => 
-      error.message.toLowerCase().includes(msg.toLowerCase())
+    return !nonRetryablePatterns.some(pattern =>
+      sources.some(source => source.includes(pattern))
     );
   }
 
@@ -243,7 +372,9 @@ class DownloadManager extends EventEmitter {
         platform: item.platform,
         addedAt: item.addedAt,
         status: item.status,
-        authorId: item.authorId
+        authorId: item.authorId,
+        channelId: item.channelId,
+        messageId: item.messageId
       }))
     };
   }
@@ -253,9 +384,8 @@ class DownloadManager extends EventEmitter {
    */
   async shutdown() {
     logger.info('Shutting down download manager...');
-    
-    // Clear queue
-    this.clearQueue();
+    this.pausedForRecovery = true;
+    this.queue = [];
     
     // Wait for active downloads to complete (with timeout)
     const shutdownTimeout = setTimeout(() => {

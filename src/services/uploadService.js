@@ -132,6 +132,10 @@ class UploadService {
       messageContent += ` • 👤 @${uploader}`;
     }
     
+    if (authorId) {
+      messageContent += `\n\n👤 Requested by <@${authorId}>`;
+    }
+    
     // Upload to Discord
     await message.edit({
       content: messageContent,
@@ -160,15 +164,20 @@ class UploadService {
     
     try {
       // Try GoFile first (no size limit)
-      const uploadUrl = await this.uploadToGoFile(filePath, filename, metadata) ||
-                        await this.uploadToCatbox(filePath, filename, fileSize, metadata);
+      let provider = 'GoFile.io';
+      let uploadUrl = await this.uploadToGoFile(filePath, filename, metadata);
+      
+      if (!uploadUrl) {
+        provider = 'Catbox.moe';
+        uploadUrl = await this.uploadToCatbox(filePath, filename, fileSize, metadata);
+      }
       
       if (!uploadUrl) {
         throw new Error('All file host uploads failed');
       }
       
       // Send link to Discord
-      await this.sendFileHostLink(message, uploadUrl, sizeMB, metadata);
+      await this.sendFileHostLink(message, uploadUrl, sizeMB, metadata, provider);
       
     } catch (error) {
       logger.error(`[${metadata.tag}] File host upload failed:`, { error: error.message });
@@ -294,7 +303,7 @@ class UploadService {
    * @param {string} sizeMB - File size in MB
    * @param {Object} metadata - File metadata
    */
-  async sendFileHostLink(message, uploadUrl, sizeMB, metadata) {
+  async sendFileHostLink(message, uploadUrl, sizeMB, metadata, provider = 'File Host') {
     const resolution = metadata.resolution || 'Unknown';
     const caption = metadata.caption || null;
     const uploader = metadata.uploader || null;
@@ -322,7 +331,12 @@ class UploadService {
       messageContent += ` • 👤 @${uploader}`;
     }
     
+    if (authorId) {
+      messageContent += `\n\n👤 Requested by <@${authorId}>`;
+    }
+    
     messageContent += `\n\n⚠️ **File too large for Discord**\n`;
+    messageContent += `📦 **Host:** ${provider}\n`;
     messageContent += `📥 **Download:** ${uploadUrl}`;
     
     await message.edit({
