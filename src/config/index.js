@@ -7,13 +7,17 @@ const CONFIG = {
   DISCORD: {
     LIMIT_BYTES: parseInt(process.env.MAX_FILE_SIZE_MB) * 1024 * 1024 || 8 * 1024 * 1024,
     TOKEN: process.env.TOKEN,
-    ADMIN_WEBHOOK_URL: process.env.ADMIN_WEBHOOK_URL
+    ADMIN_WEBHOOK_URL: process.env.ADMIN_WEBHOOK_URL,
+    ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '')
+      .split(',')
+      .map(id => id.trim())
+      .filter(Boolean)
   },
 
   // Download Settings - ✅ ENHANCED FOR MAXIMUM QUALITY
   DOWNLOAD: {
     MAX_CONCURRENT: parseInt(process.env.MAX_CONCURRENT) || 5,
-    MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 5, // ✅ Increased from 3 to 5
+    MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 7, // ✅ Increased default to 7
     MAX_QUEUE_SIZE: parseInt(process.env.MAX_QUEUE_SIZE) || 50,
     TIMEOUT: 600000, // ✅ 10 minutes (increased from 5)
     INFO_TIMEOUT: 60000, // ✅ 60 seconds (increased from 45)
@@ -39,6 +43,7 @@ const CONFIG = {
   // File Paths
   PATHS: {
     TEMP_DIR: path.join(require('os').tmpdir(), 'tikcord-temp'),
+    DATA_DIR: path.join(process.cwd(), 'data'),
     COOKIES: {
       tiktok: path.join(__dirname, '..', 'cookies', 'tiktok_cookies.txt'),
       instagram: path.join(__dirname, '..', 'cookies', 'instagram_cookies.txt')
