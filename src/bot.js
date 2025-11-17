@@ -16,6 +16,7 @@ const {
 const downloadManager = require('./services/downloadManager');
 const videoDownloader = require('./services/videoDownloader');
 const uploadService = require('./services/uploadService');
+const systemService = require('./services/systemService');
 
 // Validate configuration
 try {
@@ -90,6 +91,12 @@ class BotState {
 }
 
 const botState = new BotState();
+
+function isAdminUser(userId) {
+  const admins = CONFIG.DISCORD.ADMIN_USER_IDS;
+  if (!admins || admins.length === 0) return true;
+  return admins.includes(userId);
+}
 
 // ============= Progress Handler =============
 
@@ -181,6 +188,10 @@ downloadManager.on('download:error', async (data) => {
   const { message, error, url } = data;
   
   logger.error(`❌ Download failed for ${url}: ${error.message}`);
+  
+  if (!message) {
+    return;
+  }
   
   try {
     const errorEmbed = new EmbedBuilder()
@@ -309,6 +320,9 @@ client.once('ready', async () => {
   console.log('✅ Bot is ready and listening for video links...');
   console.log('='.repeat(60) + '\n');
   
+  await downloadManager.resumeFromPersistence(client);
+  logger.info('Persistence sync complete');
+
   const hasYtDlp = await videoDownloader.checkYtDlp();
   if (hasYtDlp) {
     await videoDownloader.updateYtDlp();
@@ -382,6 +396,7 @@ client.on('messageCreate', async (message) => {
       const added = downloadManager.addToQueue({
         url,
         message: replyMessage,
+        messageId: replyMessage.id,
         platform,
         userId: message.author.id,
         authorId: message.author.id,
@@ -456,6 +471,113 @@ client.on('interactionCreate', async (interaction) => {
           .setTimestamp();
         
         await interaction.reply({ embeds: [queueEmbed], ephemeral: true });
+        break;
+        
+      case 'system':
+        if (!isAdminUser(interaction.user.id)) {
+          await interaction.reply({ content: 'Only bot admins can use /system commands.', ephemeral: true });
+          return;
+        }
+        
+        await interaction.deferReply({ ephemeral: true });
+        const subcommand = interaction.options.getSubcommand();
+        
+        try {
+          switch (subcommand) {
+            case 'status': {
+              const [systemStatus, stats] = await Promise.all([
+                systemService.getSystemStatus(),
+                downloadManager.getStats()
+              ]);
+              
+              const disk = systemStatus.disk
+                ? `${systemStatus.disk.used}/${systemStatus.disk.size} (${systemStatus.disk.percent})`
+                : 'Unavailable';
+              
+              const statusEmbed = new EmbedBuilder()
+                .setColor(0x2ECC71)
+                .setTitle('🖥️ System Status')
+                .addFields(
+                  {
+                    name: 'CPU Load',
+                    value: `${systemStatus.load1.toFixed(2)} (${systemStatus.cpuCount} cores)`,
+                    inline: true
+                  },
+                  {
+                    name: 'Memory',
+                    value: `${formatBytes(systemStatus.memUsed)} / ${formatBytes(systemStatus.memTotal)} (${systemStatus.memPercent.toFixed(1)}%)`,
+                    inline: true
+                  },
+                  {
+                    name: 'Disk (/)',
+                    value: disk,
+                    inline: true
+                  },
+                  {
+                    name: 'Uptime',
+                    value: formatUptime(systemStatus.uptime),
+                    inline: true
+                  },
+                  {
+                    name: 'Queue',
+                    value: `${stats.activeDownloads}/${CONFIG.DOWNLOAD.MAX_CONCURRENT} active\n${stats.queueSize}/${CONFIG.DOWNLOAD.MAX_QUEUE_SIZE} queued`,
+                    inline: true
+                  },
+                  {
+                    name: 'Downloads',
+                    value: `${stats.totalDownloads} total (${stats.successRate} success)`,
+                    inline: true
+                  }
+                )
+                .setTimestamp();
+              
+              await interaction.editReply({ embeds: [statusEmbed] });
+              break;
+            }
+            
+            case 'apt-upgrade': {
+              try {
+                const output = await systemService.runAptUpgrade();
+                await interaction.editReply({
+                  content: `✅ apt update && upgrade completed:\n\`\`\`${output}\`\`\``
+                });
+              } catch (error) {
+                await interaction.editReply({
+                  content: `❌ apt upgrade failed: ${error.message}\n\`\`\`${error.output || 'No output captured'}\`\`\``
+                });
+              }
+              break;
+            }
+            
+            case 'update-yt': {
+              try {
+                const output = await systemService.updateYtDlpBinary();
+                await interaction.editReply({
+                  content: `✅ yt-dlp update result:\n\`\`\`${output}\`\`\``
+                });
+              } catch (error) {
+                await interaction.editReply({
+                  content: `❌ yt-dlp update failed: ${error.message}\n\`\`\`${error.output || 'No output captured'}\`\`\``
+                });
+              }
+              break;
+            }
+            
+            case 'reboot': {
+              await interaction.editReply({
+                content: '♻️ Reboot scheduled in 5 seconds. The bot will disconnect shortly.'
+              });
+              systemService.scheduleReboot(5000);
+              break;
+            }
+            
+            default:
+              await interaction.editReply({ content: 'Unknown system command.' });
+          }
+        } catch (error) {
+          logger.error('System command error:', { error: error.message, subcommand });
+          await interaction.editReply({ content: `❌ Command failed: ${error.message}` });
+        }
         break;
         
       default:
