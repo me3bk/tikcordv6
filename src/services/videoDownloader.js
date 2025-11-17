@@ -93,12 +93,14 @@ class VideoDownloader {
       if (platform !== 'tiktok') {
         args.push('--impersonate', impersonateTarget);
       }
-      
-      // Add cookies if available (skip for TikTok if no cookies)
-      const cookiePath = CONFIG.PATHS.COOKIES[platform];
-      if (cookiePath && fsSync.existsSync(cookiePath)) {
-        args.push('--cookies', cookiePath);
-        logger.debug(`[${tag}] Using ${platform} cookies`);
+
+      // Add cookies if available (but skip for TikTok - works without cookies)
+      if (platform !== 'tiktok') {
+        const cookiePath = CONFIG.PATHS.COOKIES[platform];
+        if (cookiePath && fsSync.existsSync(cookiePath)) {
+          args.push('--cookies', cookiePath);
+          logger.debug(`[${tag}] Using ${platform} cookies`);
+        }
       }
 
       // Log the exact command for debugging
@@ -402,13 +404,15 @@ class VideoDownloader {
         );
         break;
     }
-    
-    // Add cookies if available
-    const cookiePath = CONFIG.PATHS.COOKIES[platform];
-    if (cookiePath && fsSync.existsSync(cookiePath)) {
-      baseArgs.push('--cookies', cookiePath);
+
+    // Add cookies if available (but skip for TikTok - works without cookies)
+    if (platform !== 'tiktok') {
+      const cookiePath = CONFIG.PATHS.COOKIES[platform];
+      if (cookiePath && fsSync.existsSync(cookiePath)) {
+        baseArgs.push('--cookies', cookiePath);
+      }
     }
-    
+
     return baseArgs;
   }
 
