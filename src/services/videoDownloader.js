@@ -75,19 +75,24 @@ class VideoDownloader {
   async getVideoInfo(url, options = {}) {
     const { tag = 'unknown' } = options;
     const platform = detectPlatform(url);
-    
+
     logger.info(`[${tag}] Getting video info from ${platform}...`);
-    
+
     try {
       const impersonateTarget = CONFIG.IMPERSONATE_TARGETS[platform] || CONFIG.IMPERSONATE_TARGETS.default;
-      
+
       const args = [
         url,
         '--dump-json',
         '--no-warnings',
-        '--socket-timeout', '30',
-        '--impersonate', impersonateTarget
+        '--socket-timeout', '30'
       ];
+
+      // Only add impersonate for platforms where it's known to work
+      // TikTok works without it and may not have impersonation support
+      if (platform !== 'tiktok') {
+        args.push('--impersonate', impersonateTarget);
+      }
       
       // Add cookies if available
       const cookiePath = CONFIG.PATHS.COOKIES[platform];
@@ -326,7 +331,7 @@ class VideoDownloader {
     const formatList = CONFIG.FORMATS[platform] || CONFIG.FORMATS.default;
     const formatString = formatList.join('/');
     const impersonateTarget = CONFIG.IMPERSONATE_TARGETS[platform] || CONFIG.IMPERSONATE_TARGETS.default;
-    
+
     const baseArgs = [
       '--format', formatString,
       '--no-warnings',
@@ -334,7 +339,6 @@ class VideoDownloader {
       '--socket-timeout', '60',
       '--retries', '10',
       '--fragment-retries', '20',
-      '--impersonate', impersonateTarget,
       '--add-header', 'Accept:*/*',
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--merge-output-format', 'mp4',
@@ -342,6 +346,12 @@ class VideoDownloader {
       '--buffer-size', '16K',
       '--no-part'
     ];
+
+    // Only add impersonate for platforms where it's known to work
+    // TikTok works without it and may not have impersonation support
+    if (platform !== 'tiktok') {
+      baseArgs.push('--impersonate', impersonateTarget);
+    }
     
     // Platform-specific arguments
     switch (platform) {
