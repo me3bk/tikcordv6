@@ -7,7 +7,7 @@ const { EmbedBuilder } = require('discord.js');
 const { CONFIG } = require('../config');
 const { FILE_HOSTS, EMOJIS } = require('../constants');
 const logger = require('../utils/logger');
-const { formatBytes, getQualityBadge, promiseTimeout } = require('../utils/helpers');
+const { formatBytes, getQualityBadge, promiseTimeout, shortenText } = require('../utils/helpers');
 
 class UploadService {
   constructor() {
@@ -109,13 +109,8 @@ class UploadService {
     
     // Add caption first if available (bold)
     if (caption && caption.trim().length > 0) {
-      let formattedCaption = caption.trim();
-      
-      // Limit caption length if too long
-      if (formattedCaption.length > 500) {
-        formattedCaption = formattedCaption.substring(0, 497) + '...';
-      }
-      
+      const formattedCaption = shortenText(caption, 500);
+
       // Make caption bold
       messageContent = `**${formattedCaption}**\n\n`;
     }
@@ -131,11 +126,7 @@ class UploadService {
     if (uploader && uploader !== 'unknown_user' && uploader !== 'Unknown') {
       messageContent += ` • 👤 @${uploader}`;
     }
-    
-    if (authorId) {
-      messageContent += `\n\n👤 Requested by <@${authorId}>`;
-    }
-    
+
     // Upload to Discord
     await message.edit({
       content: messageContent,
@@ -313,10 +304,7 @@ class UploadService {
     
     // Add caption at the top if available (bold)
     if (caption && caption.trim().length > 0) {
-      let formattedCaption = caption.trim();
-      if (formattedCaption.length > 500) {
-        formattedCaption = formattedCaption.substring(0, 497) + '...';
-      }
+      const formattedCaption = shortenText(caption, 500);
       messageContent = `**${formattedCaption}**\n\n`;
     }
     
@@ -330,11 +318,7 @@ class UploadService {
     if (uploader && uploader !== 'unknown_user' && uploader !== 'Unknown') {
       messageContent += ` • 👤 @${uploader}`;
     }
-    
-    if (authorId) {
-      messageContent += `\n\n👤 Requested by <@${authorId}>`;
-    }
-    
+
     messageContent += `\n\n⚠️ **File too large for Discord**\n`;
     messageContent += `📦 **Host:** ${provider}\n`;
     messageContent += `📥 **Download:** ${uploadUrl}`;

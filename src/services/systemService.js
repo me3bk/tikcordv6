@@ -3,6 +3,7 @@ const os = require('os');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const logger = require('../utils/logger');
+const videoDownloader = require('./videoDownloader');
 
 const execAsync = promisify(exec);
 const MAX_OUTPUT = 1800;
@@ -63,9 +64,10 @@ async function runAptUpgrade() {
 }
 
 async function updateYtDlpBinary() {
-  return await runShell('yt-dlp -U', {
-    timeout: 5 * 60 * 1000
-  });
+  const updated = await videoDownloader.updateYtDlp();
+  return updated
+    ? 'yt-dlp updated successfully.'
+    : 'yt-dlp is already up to date or no update was needed.';
 }
 
 function scheduleReboot(delayMs = 5000) {

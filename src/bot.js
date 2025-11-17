@@ -17,6 +17,7 @@ const downloadManager = require('./services/downloadManager');
 const videoDownloader = require('./services/videoDownloader');
 const uploadService = require('./services/uploadService');
 const systemService = require('./services/systemService');
+const persistenceService = require('./services/persistenceService');
 
 // Validate configuration
 try {
@@ -94,7 +95,7 @@ const botState = new BotState();
 
 function isAdminUser(userId) {
   const admins = CONFIG.DISCORD.ADMIN_USER_IDS;
-  if (!admins || admins.length === 0) return true;
+  if (!admins || admins.length === 0) return false;
   return admins.includes(userId);
 }
 
@@ -267,8 +268,9 @@ function scheduleHealthCheck() {
 function scheduleCleanup() {
   const interval = setInterval(async () => {
     await videoDownloader.cleanupOldFiles(24);
+    persistenceService.cleanupOldRecords(30);
   }, CONFIG.SYSTEM.CLEANUP_INTERVAL);
-  
+
   botState.addInterval(interval);
   logger.info('🧹 Scheduled automatic cleanup');
 }
@@ -277,11 +279,19 @@ function scheduleCleanup() {
 
 async function gracefulShutdown() {
   logger.warn('🛑 Initiating graceful shutdown...');
-  
+
   botState.clearIntervals();
   await downloadManager.shutdown();
   await client.destroy();
-  
+
+  try {
+    if (persistenceService && typeof persistenceService.close === 'function') {
+      persistenceService.close();
+    }
+  } catch (error) {
+    logger.error('Error while closing persistence service:', { error: error.message });
+  }
+
   logger.info('✅ Graceful shutdown complete');
   process.exit(0);
 }
@@ -557,7 +567,7 @@ client.on('interactionCreate', async (interaction) => {
                 });
               } catch (error) {
                 await interaction.editReply({
-                  content: `❌ yt-dlp update failed: ${error.message}\n\`\`\`${error.output || 'No output captured'}\`\`\``
+                  content: `❌ yt-dlp update failed: ${error.message}`
                 });
               }
               break;

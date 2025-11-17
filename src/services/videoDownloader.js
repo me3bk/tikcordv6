@@ -7,12 +7,13 @@ const { promisify } = require('util');
 const axios = require('axios');
 const { CONFIG } = require('../config');
 const logger = require('../utils/logger');
-const { 
-  sanitizeFilename, 
-  getDateTag, 
+const {
+  sanitizeFilename,
+  getDateTag,
   detectPlatform,
   promiseTimeout,
-  retryWithBackoff 
+  retryWithBackoff,
+  shortenText
 } = require('../utils/helpers');
 
 const execFileAsync = promisify(execFile);
@@ -158,11 +159,8 @@ class VideoDownloader {
       
       // Generate filename
       const username = sanitizeFilename(metadata.uploader || metadata.uploaderId || 'unknown_user');
-      let caption = metadata.description || metadata.title || null;
-      if (caption && caption.length > 200) {
-        caption = caption.substring(0, 197) + '...';
-      }
-      
+      let caption = shortenText(metadata.description || metadata.title || null, 200);
+
       const dateTag = getDateTag();
       const fileName = `${username}_${dateTag}_${tag}.mp4`;
       outPath = path.join(this.tempDir, fileName);
