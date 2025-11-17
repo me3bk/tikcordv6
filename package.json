@@ -5,12 +5,16 @@
   "main": "src/bot.js",
   "type": "commonjs",
   "scripts": {
+    "prestart": "node scripts/deploy-commands.js",
     "start": "node src/bot.js",
+    "prestart:dev": "node scripts/deploy-commands.js",
     "start:dev": "node --expose-gc src/bot.js",
-    "test": "node src/utils/healthCheck.js"
+    "test": "node src/utils/healthCheck.js",
+    "deploy:commands": "node scripts/deploy-commands.js"
   },
   "dependencies": {
     "axios": "^1.12.2",
+    "better-sqlite3": "^9.4.5",
     "discord.js": "^14.18.0",
     "dotenv": "^16.6.1",
     "form-data": "^4.0.4"
