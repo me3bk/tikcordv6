@@ -94,13 +94,16 @@ class VideoDownloader {
         args.push('--impersonate', impersonateTarget);
       }
       
-      // Add cookies if available
+      // Add cookies if available (skip for TikTok if no cookies)
       const cookiePath = CONFIG.PATHS.COOKIES[platform];
       if (cookiePath && fsSync.existsSync(cookiePath)) {
         args.push('--cookies', cookiePath);
         logger.debug(`[${tag}] Using ${platform} cookies`);
       }
-      
+
+      // Log the exact command for debugging
+      logger.debug(`[${tag}] yt-dlp command: yt-dlp ${args.join(' ')}`);
+
       const { stdout } = await promiseTimeout(
         execFileAsync('yt-dlp', args, {
           maxBuffer: 10 * 1024 * 1024
@@ -108,11 +111,11 @@ class VideoDownloader {
         CONFIG.DOWNLOAD.INFO_TIMEOUT,
         'Video info retrieval timed out'
       );
-      
+
       const info = JSON.parse(stdout);
-      
+
       logger.info(`[${tag}] Video info retrieved: ${info.title || 'Unknown'}`);
-      
+
       return {
         title: info.title || 'video',
         description: info.description || null,
@@ -124,9 +127,16 @@ class VideoDownloader {
         resolution: info.resolution || null,
         filesize: info.filesize || info.filesize_approx || null
       };
-      
+
     } catch (error) {
-      logger.error(`[${tag}] Failed to get video info:`, { error: error.message });
+      // Enhanced error logging to capture full details
+      const errorDetails = {
+        message: error.message || 'Unknown error',
+        code: error.code || 'N/A',
+        stderr: error.stderr?.toString() || 'none',
+        stdout: error.stdout?.toString() || 'none'
+      };
+      logger.error(`[${tag}] Failed to get video info:`, errorDetails);
       
       // Return basic metadata on error
       return {
@@ -171,7 +181,7 @@ class VideoDownloader {
       outPath = path.join(this.tempDir, fileName);
       
       logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
-      
+
       // Get platform-specific arguments
       const platformArgs = this.getPlatformArgs(platform, url);
       const args = [
@@ -181,7 +191,10 @@ class VideoDownloader {
         '--progress',
         '--newline'
       ];
-      
+
+      // Log the exact command for debugging
+      logger.debug(`[${tag}] yt-dlp download command: yt-dlp ${args.join(' ')}`);
+
       // Execute yt-dlp
       let lastYtDlpError = '';
       const ytDlp = execFile('yt-dlp', args, {
@@ -258,9 +271,16 @@ class VideoDownloader {
           resolution: metadata.resolution
         }
       };
-      
+
     } catch (error) {
-      logger.error(`[${tag}] yt-dlp download failed:`, { error: error.message });
+      // Enhanced error logging to capture full details
+      const errorDetails = {
+        message: error.message || 'Unknown error',
+        isPermanent: error.isPermanent || false,
+        rawOutput: error.rawOutput || 'none',
+        code: error.code || 'N/A'
+      };
+      logger.error(`[${tag}] yt-dlp download failed:`, errorDetails);
       
       // Clean up failed download
       if (outPath && fsSync.existsSync(outPath)) {
