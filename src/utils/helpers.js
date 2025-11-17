@@ -26,6 +26,7 @@ function normalizeUrlForComparison(url) {
 function detectAllUrls(text, patterns) {
   const urls = [];
   const seenNormalizedUrls = new Map(); // Map to track normalized URL to original
+  let totalMatches = 0;
 
   logger.debug(`🔍 Scanning message for URLs (text length: ${text.length} chars)`);
 
@@ -34,12 +35,12 @@ function detectAllUrls(text, patterns) {
     let matchCount = 0;
 
     for (const match of matches) {
-      let url = match[0];
+      totalMatches++;
       matchCount++;
 
-      // Normalize the URL for comparison
+      let url = match[0];
       const normalizedUrl = normalizeUrlForComparison(url);
-      
+
       logger.debug(`Found ${platform} match: ${url}`, { normalized: normalizedUrl });
 
       // Check if we've seen this normalized URL before
@@ -58,7 +59,7 @@ function detectAllUrls(text, patterns) {
     }
   }
 
-  logger.info(`📊 URL Detection: ${seenNormalizedUrls.size} unique from ${urls.length + (seenNormalizedUrls.size - urls.length)} total matches`);
+  logger.info(`📊 URL Detection: ${seenNormalizedUrls.size} unique from ${totalMatches} total matches`);
   return urls;
 }
 
@@ -219,7 +220,7 @@ function promiseTimeout(promise, ms, message = 'Operation timed out') {
  */
 async function retryWithBackoff(fn, maxRetries = 3, delay = 1000) {
   let lastError;
-  
+
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
@@ -231,8 +232,21 @@ async function retryWithBackoff(fn, maxRetries = 3, delay = 1000) {
       }
     }
   }
-  
+
   throw lastError;
+}
+
+/**
+ * Shorten text to a maximum length with ellipsis
+ * @param {string} text - Text to shorten
+ * @param {number} max - Maximum length (default 500)
+ * @returns {string} Shortened text
+ */
+function shortenText(text, max = 500) {
+  if (!text) return '';
+  const trimmed = text.toString().trim();
+  if (trimmed.length <= max) return trimmed;
+  return trimmed.slice(0, max - 3) + '...';
 }
 
 module.exports = {
@@ -248,5 +262,6 @@ module.exports = {
   getQualityBadge,
   sleep,
   promiseTimeout,
-  retryWithBackoff
+  retryWithBackoff,
+  shortenText
 };

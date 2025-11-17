@@ -52,39 +52,47 @@ class PersistenceService {
   saveQueueItem(item) {
     if (!this.isReady()) return;
 
-    const stmt = this.db.prepare(`
-      INSERT INTO downloads (
-        tag, url, platform, status, user_id, author_id,
-        channel_id, guild_id, message_id, added_at, retries
-      )
-      VALUES (@tag, @url, @platform, @status, @userId, @authorId,
-              @channelId, @guildId, @messageId, @addedAt, @retries)
-      ON CONFLICT(tag) DO UPDATE SET
-        url=excluded.url,
-        platform=excluded.platform,
-        status=excluded.status,
-        user_id=excluded.user_id,
-        author_id=excluded.author_id,
-        channel_id=excluded.channel_id,
-        guild_id=excluded.guild_id,
-        message_id=excluded.message_id,
-        added_at=excluded.added_at,
-        retries=excluded.retries
-    `);
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO downloads (
+          tag, url, platform, status, user_id, author_id,
+          channel_id, guild_id, message_id, added_at, retries
+        )
+        VALUES (@tag, @url, @platform, @status, @userId, @authorId,
+                @channelId, @guildId, @messageId, @addedAt, @retries)
+        ON CONFLICT(tag) DO UPDATE SET
+          url=excluded.url,
+          platform=excluded.platform,
+          status=excluded.status,
+          user_id=excluded.user_id,
+          author_id=excluded.author_id,
+          channel_id=excluded.channel_id,
+          guild_id=excluded.guild_id,
+          message_id=excluded.message_id,
+          added_at=excluded.added_at,
+          retries=excluded.retries
+      `);
 
-    stmt.run({
-      tag: item.tag,
-      url: item.url,
-      platform: item.platform,
-      status: item.status || 'queued',
-      userId: item.userId || null,
-      authorId: item.authorId || null,
-      channelId: item.channelId || null,
-      guildId: item.guildId || null,
-      messageId: item.message?.id || item.messageId || null,
-      addedAt: item.addedAt || Date.now(),
-      retries: item.retryCount || 0
-    });
+      stmt.run({
+        tag: item.tag,
+        url: item.url,
+        platform: item.platform,
+        status: item.status || 'queued',
+        userId: item.userId || null,
+        authorId: item.authorId || null,
+        channelId: item.channelId || null,
+        guildId: item.guildId || null,
+        messageId: item.message?.id || item.messageId || null,
+        addedAt: item.addedAt || Date.now(),
+        retries: item.retryCount || 0
+      });
+    } catch (error) {
+      logger.error('Failed to save queue item:', {
+        error: error.message,
+        tag: item.tag,
+        url: item.url
+      });
+    }
   }
 
   markAsActive(tag) {
@@ -205,6 +213,38 @@ class PersistenceService {
       totalBytes: totals.bytes || 0,
       byPlatform
     };
+  }
+
+  cleanupOldRecords(maxAgeDays = 30) {
+    if (!this.isReady()) return;
+
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+    try {
+      const result = this.db.prepare(`
+        DELETE FROM downloads
+        WHERE completed_at IS NOT NULL
+          AND completed_at < @cutoff
+      `).run({ cutoff });
+
+      if (result.changes > 0) {
+        logger.info(`Cleaned up ${result.changes} old download records (older than ${maxAgeDays} days)`);
+      }
+    } catch (error) {
+      logger.error('Failed to cleanup old records:', { error: error.message });
+    }
+  }
+
+  close() {
+    if (this.db) {
+      try {
+        this.db.close();
+      } catch (error) {
+        logger.error('Failed to close persistence DB:', { error: error.message });
+      } finally {
+        this.db = null;
+      }
+    }
   }
 }
 

@@ -5,7 +5,7 @@ const path = require('path');
 const CONFIG = {
   // Discord Settings
   DISCORD: {
-    LIMIT_BYTES: parseInt(process.env.MAX_FILE_SIZE_MB) * 1024 * 1024 || 8 * 1024 * 1024,
+    LIMIT_BYTES: ((parseInt(process.env.MAX_FILE_SIZE_MB, 10) || 8) * 1024 * 1024),
     TOKEN: process.env.TOKEN,
     ADMIN_WEBHOOK_URL: process.env.ADMIN_WEBHOOK_URL,
     ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '')
