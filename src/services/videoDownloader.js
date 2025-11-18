@@ -88,13 +88,8 @@ class VideoDownloader {
         '--socket-timeout', '30'
       ];
 
-      // Only add impersonate for platforms where it's known to work
-      // TikTok works without it and may not have impersonation support
-      if (platform !== 'tiktok') {
-        args.push('--impersonate', impersonateTarget);
-      }
-
-      // Add cookies if available (but skip for TikTok - works without cookies)
+      // Skip impersonate - not supported by this yt-dlp build
+      // Skip cookies for TikTok (works without them)
       if (platform !== 'tiktok') {
         const cookiePath = CONFIG.PATHS.COOKIES[platform];
         if (cookiePath && fsSync.existsSync(cookiePath)) {
@@ -369,11 +364,7 @@ class VideoDownloader {
       '--no-part'
     ];
 
-    // Only add impersonate for platforms where it's known to work
-    // TikTok works without it and may not have impersonation support
-    if (platform !== 'tiktok') {
-      baseArgs.push('--impersonate', impersonateTarget);
-    }
+    // Skip impersonate - not supported by this yt-dlp build
     
     // Platform-specific arguments
     switch (platform) {
