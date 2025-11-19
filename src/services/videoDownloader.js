@@ -169,6 +169,12 @@ class VideoDownloader {
 
     logger.info(`[${tag}] Starting download from ${platform}...`);
 
+    // For YouTube, skip yt-dlp entirely and use API directly
+    if (platform === 'youtube') {
+      logger.info(`[${tag}] Using YouTube API (yt-dlp unreliable for YouTube)`);
+      return await this.downloadYouTubeViaAPI(url, options);
+    }
+
     if (retries > 0) {
       return await this.downloadWithRetry(url, options);
     }
@@ -589,7 +595,7 @@ class VideoDownloader {
   }
 
   /**
-   * Download YouTube via API fallback (cobalt.tools)
+   * Download YouTube via API (primary method - yt-dlp unreliable)
    * @param {string} url - YouTube URL
    * @param {Object} options - Download options
    * @returns {Object} Download result
@@ -597,150 +603,286 @@ class VideoDownloader {
   async downloadYouTubeViaAPI(url, options = {}) {
     const { tag = 'unknown', youtubeOptions } = options;
 
+    // Determine quality and format
+    let isAudioOnly = false;
+    let quality = '720'; // Default to 720p
+
+    if (youtubeOptions && youtubeOptions.quality) {
+      isAudioOnly = youtubeOptions.quality === 'audio';
+      const qualityMap = {
+        '720p': '720',
+        '1080p': '1080',
+        '1440p': '1440',
+        '2160p': '2160',
+        'best': '1080'
+      };
+      quality = qualityMap[youtubeOptions.quality] || '720';
+    }
+
+    // Try multiple APIs in order
+    const apis = [
+      { name: 'yt5s.io', fn: () => this.downloadYouTubeViaYt5s(url, tag, quality, isAudioOnly) },
+      { name: 'y2mate.nu', fn: () => this.downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) }
+    ];
+
+    let lastError = null;
+
+    for (const api of apis) {
+      try {
+        logger.info(`[${tag}] 🔄 Trying YouTube API (${api.name})...`);
+        const result = await api.fn();
+        logger.info(`[${tag}] ✅ Downloaded via ${api.name}: ${result.filename} (${(result.size/1024/1024).toFixed(2)}MB)`);
+        return result;
+      } catch (error) {
+        logger.warn(`[${tag}] ${api.name} failed: ${error.message}`);
+        lastError = error;
+        continue;
+      }
+    }
+
+    // All APIs failed
+    const apiError = this.normalizeApiError(lastError, 'All YouTube APIs failed');
+    logger.error(`[${tag}] All YouTube APIs failed`);
+    throw apiError;
+  }
+
+  /**
+   * Download YouTube via yt5s.io API
+   */
+  async downloadYouTubeViaYt5s(url, tag, quality, isAudioOnly) {
     try {
-      logger.info(`[${tag}] 🔄 Trying YouTube API fallback (cobalt.tools)...`);
-
-      // Determine quality preference
-      let quality = '1080';
-      let isAudioOnly = false;
-
-      if (youtubeOptions && youtubeOptions.quality) {
-        const qualityMap = {
-          'audio': { quality: 'max', audioOnly: true },
-          '720p': { quality: '720' },
-          '1080p': { quality: '1080' },
-          '1440p': { quality: '1440' },
-          '2160p': { quality: '2160' },
-          'best': { quality: 'max' }
-        };
-
-        const mapped = qualityMap[youtubeOptions.quality] || { quality: '1080' };
-        quality = mapped.quality;
-        isAudioOnly = mapped.audioOnly || false;
+      // Extract video ID
+      const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
       }
 
-      const response = await axios.post('https://co.wuk.sh/api/json', {
-        url: url,
-        vQuality: quality,
-        isAudioOnly: isAudioOnly,
-        filenamePattern: 'basic',
-        downloadMode: 'auto'
-      }, {
+      // Get download links
+      const analyzeResponse = await axios.post('https://yt5s.io/api/ajaxSearch',
+        `q=${encodeURIComponent(url)}&vt=${isAudioOnly ? 'mp3' : 'mp4'}`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 30000
+        }
+      );
+
+      if (analyzeResponse.data.status !== 'ok') {
+        throw new Error('yt5s.io analyze failed');
+      }
+
+      // Find best quality link
+      const links = analyzeResponse.data.links;
+      let downloadKey;
+
+      if (isAudioOnly && links.mp3) {
+        // Get best audio quality
+        const audioQualities = Object.keys(links.mp3);
+        downloadKey = links.mp3[audioQualities[0]]?.k;
+      } else if (links.mp4) {
+        // Get requested video quality or best available
+        const videoQualities = Object.keys(links.mp4);
+        const requestedQuality = quality + 'p';
+
+        if (links.mp4[requestedQuality]) {
+          downloadKey = links.mp4[requestedQuality].k;
+        } else {
+          // Fallback to best available
+          downloadKey = links.mp4[videoQualities[0]]?.k;
+        }
+      }
+
+      if (!downloadKey) {
+        throw new Error('No suitable download link found');
+      }
+
+      // Convert the download key
+      const convertResponse = await axios.post('https://yt5s.io/api/ajaxConvert',
+        `vid=${videoId}&k=${downloadKey}`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 60000
+        }
+      );
+
+      if (convertResponse.data.status !== 'ok' || !convertResponse.data.dlink) {
+        throw new Error('yt5s.io convert failed');
+      }
+
+      const downloadUrl = convertResponse.data.dlink;
+      const title = analyzeResponse.data.title || 'video';
+
+      // Download the file
+      const dateTag = getDateTag();
+      const ext = isAudioOnly ? 'mp3' : 'mp4';
+      const fileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${ext}`;
+      const outPath = path.join(this.tempDir, fileName);
+
+      await this.ensureTempDir();
+
+      logger.info(`[${tag}] Downloading from yt5s.io: ${fileName}`);
+
+      const writer = fsSync.createWriteStream(outPath);
+      const videoResponse = await axios({
+        url: downloadUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: CONFIG.DOWNLOAD.TIMEOUT,
         headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        timeout: 60000
+        }
       });
 
-      if (response.data.status === 'redirect' && response.data.url) {
-        const videoUrl = response.data.url;
-        const filename = response.data.filename || 'video';
+      videoResponse.data.pipe(writer);
 
-        const dateTag = getDateTag();
-        const ext = isAudioOnly ? 'mp3' : 'mp4';
-        const fileName = `${sanitizeFilename(filename)}_${dateTag}_${tag}.${ext}`;
-        const outPath = path.join(this.tempDir, fileName);
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
 
-        await this.ensureTempDir();
-
-        // Download video/audio file
-        logger.info(`[${tag}] Downloading from YouTube API: ${fileName}`);
-
-        const writer = fsSync.createWriteStream(outPath);
-        const videoResponse = await axios({
-          url: videoUrl,
-          method: 'GET',
-          responseType: 'stream',
-          timeout: CONFIG.DOWNLOAD.TIMEOUT,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
-        });
-
-        videoResponse.data.pipe(writer);
-
-        await new Promise((resolve, reject) => {
-          writer.on('finish', resolve);
-          writer.on('error', reject);
-        });
-
-        // Verify download
-        if (!fsSync.existsSync(outPath)) {
-          throw new Error('YouTube API download failed - file not created');
-        }
-
-        const stats = fsSync.statSync(outPath);
-        if (stats.size === 0) {
-          throw new Error('YouTube API download failed - empty file');
-        }
-
-        logger.info(`[${tag}] ✅ Downloaded via YouTube API: ${fileName} (${(stats.size/1024/1024).toFixed(2)}MB)`);
-
-        return {
-          path: outPath,
-          size: stats.size,
-          filename: fileName,
-          platform: 'youtube',
-          metadata: {
-            uploader: 'youtube',
-            caption: null,
-            resolution: isAudioOnly ? 'audio' : quality + 'p'
-          }
-        };
-      } else if (response.data.status === 'stream' && response.data.url) {
-        // Handle stream response (similar to redirect)
-        const videoUrl = response.data.url;
-        const dateTag = getDateTag();
-        const ext = isAudioOnly ? 'mp3' : 'mp4';
-        const fileName = `youtube_${dateTag}_${tag}.${ext}`;
-        const outPath = path.join(this.tempDir, fileName);
-
-        await this.ensureTempDir();
-
-        logger.info(`[${tag}] Downloading from YouTube API: ${fileName}`);
-
-        const writer = fsSync.createWriteStream(outPath);
-        const videoResponse = await axios({
-          url: videoUrl,
-          method: 'GET',
-          responseType: 'stream',
-          timeout: CONFIG.DOWNLOAD.TIMEOUT,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
-        });
-
-        videoResponse.data.pipe(writer);
-
-        await new Promise((resolve, reject) => {
-          writer.on('finish', resolve);
-          writer.on('error', reject);
-        });
-
-        const stats = fsSync.statSync(outPath);
-        logger.info(`[${tag}] ✅ Downloaded via YouTube API: ${fileName} (${(stats.size/1024/1024).toFixed(2)}MB)`);
-
-        return {
-          path: outPath,
-          size: stats.size,
-          filename: fileName,
-          platform: 'youtube',
-          metadata: {
-            uploader: 'youtube',
-            caption: null,
-            resolution: isAudioOnly ? 'audio' : quality + 'p'
-          }
-        };
+      // Verify download
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error('Download failed - file not created');
       }
 
-      throw new Error(`YouTube API error: ${response.data.text || 'Unknown error'}`);
+      const stats = fsSync.statSync(outPath);
+      if (stats.size === 0) {
+        throw new Error('Download failed - empty file');
+      }
+
+      return {
+        path: outPath,
+        size: stats.size,
+        filename: fileName,
+        platform: 'youtube',
+        metadata: {
+          uploader: 'youtube',
+          caption: null,
+          resolution: isAudioOnly ? 'audio' : quality + 'p'
+        }
+      };
 
     } catch (error) {
-      const apiError = this.normalizeApiError(error, 'YouTube API fallback failed');
-      logger.error(`[${tag}] YouTube API fallback failed:`, { error: apiError.message });
-      throw apiError;
+      throw new Error(`yt5s.io: ${error.message}`);
+    }
+  }
+
+  /**
+   * Download YouTube via y2mate.nu API
+   */
+  async downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) {
+    try {
+      // Extract video ID
+      const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
+      }
+
+      // Analyze video
+      const analyzeResponse = await axios.post('https://www.y2mate.nu/api/ajaxSearch',
+        `q=${encodeURIComponent(url)}&vt=${isAudioOnly ? 'mp3' : 'mp4'}`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 30000
+        }
+      );
+
+      if (analyzeResponse.data.status !== 'ok') {
+        throw new Error('y2mate.nu analyze failed');
+      }
+
+      const links = analyzeResponse.data.links;
+      let downloadKey;
+
+      if (isAudioOnly && links.mp3) {
+        const audioQualities = Object.keys(links.mp3);
+        downloadKey = links.mp3[audioQualities[0]]?.k;
+      } else if (links.mp4) {
+        const videoQualities = Object.keys(links.mp4);
+        const requestedQuality = quality + 'p';
+
+        if (links.mp4[requestedQuality]) {
+          downloadKey = links.mp4[requestedQuality].k;
+        } else {
+          downloadKey = links.mp4[videoQualities[0]]?.k;
+        }
+      }
+
+      if (!downloadKey) {
+        throw new Error('No suitable download link found');
+      }
+
+      // Convert
+      const convertResponse = await axios.post('https://www.y2mate.nu/api/ajaxConvert',
+        `vid=${videoId}&k=${downloadKey}`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 60000
+        }
+      );
+
+      if (convertResponse.data.status !== 'ok' || !convertResponse.data.dlink) {
+        throw new Error('y2mate.nu convert failed');
+      }
+
+      const downloadUrl = convertResponse.data.dlink;
+      const title = analyzeResponse.data.title || 'video';
+
+      // Download
+      const dateTag = getDateTag();
+      const ext = isAudioOnly ? 'mp3' : 'mp4';
+      const fileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${ext}`;
+      const outPath = path.join(this.tempDir, fileName);
+
+      await this.ensureTempDir();
+
+      logger.info(`[${tag}] Downloading from y2mate.nu: ${fileName}`);
+
+      const writer = fsSync.createWriteStream(outPath);
+      const videoResponse = await axios({
+        url: downloadUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: CONFIG.DOWNLOAD.TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      videoResponse.data.pipe(writer);
+
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+
+      const stats = fsSync.statSync(outPath);
+
+      return {
+        path: outPath,
+        size: stats.size,
+        filename: fileName,
+        platform: 'youtube',
+        metadata: {
+          uploader: 'youtube',
+          caption: null,
+          resolution: isAudioOnly ? 'audio' : quality + 'p'
+        }
+      };
+
+    } catch (error) {
+      throw new Error(`y2mate.nu: ${error.message}`);
     }
   }
 
