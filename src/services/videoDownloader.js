@@ -623,7 +623,8 @@ class VideoDownloader {
     const apis = [
       { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) },
       { name: 'yt5s.io', fn: () => this.downloadYouTubeViaYt5s(url, tag, quality, isAudioOnly) },
-      { name: 'y2mate.nu', fn: () => this.downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) }
+      { name: 'y2mate.nu', fn: () => this.downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) },
+      { name: 'loader.to', fn: () => this.downloadYouTubeViaLoader(url, tag, quality, isAudioOnly) }
     ];
 
     let lastError = null;
@@ -671,12 +672,23 @@ class VideoDownloader {
         timeout: 30000
       });
 
-      if (!response.data || !response.data.data) {
-        throw new Error('vidfly.ai returned invalid response');
+      // Debug logging
+      logger.debug(`[${tag}] vidfly.ai response status: ${response.data?.status || 'unknown'}`);
+      logger.debug(`[${tag}] vidfly.ai has data: ${!!response.data?.data}`);
+
+      if (!response.data || response.data.status === 'error') {
+        throw new Error(response.data?.message || 'vidfly.ai returned error');
+      }
+
+      if (!response.data.data) {
+        throw new Error('vidfly.ai returned invalid response structure');
       }
 
       const data = response.data.data;
       const title = data.title || 'video';
+
+      // Debug formats available
+      logger.debug(`[${tag}] vidfly.ai formats available: ${data.formats?.length || 0}`);
 
       // Find best quality video or audio based on request
       let downloadUrl;
@@ -684,17 +696,22 @@ class VideoDownloader {
       if (isAudioOnly) {
         // Get audio stream
         const audioFormats = data.formats?.filter(f => f.mimeType?.includes('audio')) || [];
+        logger.debug(`[${tag}] Found ${audioFormats.length} audio formats`);
+
         if (audioFormats.length > 0) {
           // Sort by bitrate descending
           audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
           downloadUrl = audioFormats[0].url;
+          logger.debug(`[${tag}] Selected audio format with bitrate: ${audioFormats[0].bitrate}`);
         }
       } else {
         // Get video stream with requested quality
         const videoFormats = data.formats?.filter(f => f.mimeType?.includes('video') && f.qualityLabel) || [];
+        logger.debug(`[${tag}] Found ${videoFormats.length} video formats`);
 
         if (videoFormats.length > 0) {
           const requestedQuality = quality + 'p';
+          logger.debug(`[${tag}] Requested quality: ${requestedQuality}`);
 
           // Try to find exact quality match
           let selectedFormat = videoFormats.find(f => f.qualityLabel === requestedQuality);
@@ -707,6 +724,7 @@ class VideoDownloader {
               return heightB - heightA;
             });
             selectedFormat = videoFormats[0];
+            logger.debug(`[${tag}] Using fallback quality: ${selectedFormat.qualityLabel}`);
           }
 
           downloadUrl = selectedFormat.url;
@@ -714,6 +732,8 @@ class VideoDownloader {
       }
 
       if (!downloadUrl) {
+        // Log the actual structure for debugging
+        logger.error(`[${tag}] vidfly.ai response structure: ${JSON.stringify(data, null, 2).substring(0, 500)}`);
         throw new Error('No suitable download link found');
       }
 
@@ -1009,6 +1029,132 @@ class VideoDownloader {
 
     } catch (error) {
       throw new Error(`y2mate.nu: ${error.message}`);
+    }
+  }
+
+  /**
+   * Download YouTube via loader.to API (most reliable fallback)
+   */
+  async downloadYouTubeViaLoader(url, tag, quality, isAudioOnly) {
+    try {
+      // Extract video ID
+      const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
+      }
+
+      // Request download
+      const formatType = isAudioOnly ? 'audio' : 'video';
+      const formatQuality = isAudioOnly ? 'mp3' : quality;
+
+      const prepareResponse = await axios.get(`https://loader.to/ajax/download.php`, {
+        params: {
+          format: formatType,
+          url: url,
+          api: 'dfcb6d76f2f6a9894gjkege8a4ab232222'
+        },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        timeout: 30000
+      });
+
+      if (!prepareResponse.data || !prepareResponse.data.id) {
+        throw new Error('loader.to prepare failed');
+      }
+
+      const downloadId = prepareResponse.data.id;
+
+      // Wait for conversion (poll for status)
+      let downloadUrl = null;
+      let attempts = 0;
+      const maxAttempts = 20;
+
+      while (!downloadUrl && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+
+        const progressResponse = await axios.get(`https://loader.to/ajax/progress.php`, {
+          params: {
+            id: downloadId
+          },
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 10000
+        });
+
+        if (progressResponse.data && progressResponse.data.download_url) {
+          downloadUrl = progressResponse.data.download_url;
+          break;
+        }
+
+        if (progressResponse.data && progressResponse.data.progress >= 1000) {
+          // Conversion complete but no URL (error)
+          throw new Error('loader.to conversion failed');
+        }
+
+        attempts++;
+      }
+
+      if (!downloadUrl) {
+        throw new Error('loader.to timeout waiting for conversion');
+      }
+
+      // Get title
+      const title = prepareResponse.data.title || 'video';
+
+      // Download the file
+      const dateTag = getDateTag();
+      const ext = isAudioOnly ? 'mp3' : 'mp4';
+      const fileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${ext}`;
+      const outPath = path.join(this.tempDir, fileName);
+
+      await this.ensureTempDir();
+
+      logger.info(`[${tag}] Downloading from loader.to: ${fileName}`);
+
+      const writer = fsSync.createWriteStream(outPath);
+      const videoResponse = await axios({
+        url: downloadUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: CONFIG.DOWNLOAD.TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      videoResponse.data.pipe(writer);
+
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+
+      // Verify download
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error('Download failed - file not created');
+      }
+
+      const stats = fsSync.statSync(outPath);
+      if (stats.size === 0) {
+        throw new Error('Download failed - empty file');
+      }
+
+      return {
+        path: outPath,
+        size: stats.size,
+        filename: fileName,
+        platform: 'youtube',
+        metadata: {
+          uploader: 'youtube',
+          caption: null,
+          resolution: isAudioOnly ? 'audio' : quality + 'p'
+        }
+      };
+
+    } catch (error) {
+      throw new Error(`loader.to: ${error.message}`);
     }
   }
 
