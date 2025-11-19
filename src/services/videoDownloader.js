@@ -619,12 +619,10 @@ class VideoDownloader {
       quality = qualityMap[youtubeOptions.quality] || '720';
     }
 
-    // Try multiple APIs in order
+    // Try multiple APIs in order (only working APIs)
     const apis = [
-      { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) },
-      { name: 'yt5s.io', fn: () => this.downloadYouTubeViaYt5s(url, tag, quality, isAudioOnly) },
-      { name: 'y2mate.nu', fn: () => this.downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) },
-      { name: 'loader.to', fn: () => this.downloadYouTubeViaLoader(url, tag, quality, isAudioOnly) }
+      { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) }
+      // yt5s.io, y2mate.nu, loader.to all return 404/400 errors - removed
     ];
 
     let lastError = null;
@@ -687,52 +685,59 @@ class VideoDownloader {
       const data = response.data.data;
       const title = data.title || 'video';
 
-      // Debug formats available
-      logger.debug(`[${tag}] vidfly.ai formats available: ${data.formats?.length || 0}`);
+      // vidfly.ai uses "items" not "formats"
+      const items = data.items || [];
+      logger.debug(`[${tag}] vidfly.ai items available: ${items.length}`);
+
+      if (items.length === 0) {
+        logger.error(`[${tag}] vidfly.ai response structure: ${JSON.stringify(data, null, 2).substring(0, 500)}`);
+        throw new Error('No items found in vidfly.ai response');
+      }
 
       // Find best quality video or audio based on request
       let downloadUrl;
 
       if (isAudioOnly) {
-        // Get audio stream
-        const audioFormats = data.formats?.filter(f => f.mimeType?.includes('audio')) || [];
-        logger.debug(`[${tag}] Found ${audioFormats.length} audio formats`);
+        // Get audio items (type includes 'audio')
+        const audioItems = items.filter(item => item.type?.includes('audio') || item.ext === 'mp3');
+        logger.debug(`[${tag}] Found ${audioItems.length} audio items`);
 
-        if (audioFormats.length > 0) {
-          // Sort by bitrate descending
-          audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-          downloadUrl = audioFormats[0].url;
-          logger.debug(`[${tag}] Selected audio format with bitrate: ${audioFormats[0].bitrate}`);
+        if (audioItems.length > 0) {
+          // Get first audio (usually best quality)
+          downloadUrl = audioItems[0].url;
+          logger.debug(`[${tag}] Selected audio: ${audioItems[0].label || 'unknown'}`);
+        } else {
+          // Fallback: extract audio from video
+          downloadUrl = items[0].url;
+          logger.debug(`[${tag}] No audio-only, using video: ${items[0].label}`);
         }
       } else {
-        // Get video stream with requested quality
-        const videoFormats = data.formats?.filter(f => f.mimeType?.includes('video') && f.qualityLabel) || [];
-        logger.debug(`[${tag}] Found ${videoFormats.length} video formats`);
+        // Get video items with the requested quality
+        const requestedHeight = parseInt(quality);
+        logger.debug(`[${tag}] Requested quality: ${quality}p (height: ${requestedHeight})`);
 
-        if (videoFormats.length > 0) {
-          const requestedQuality = quality + 'p';
-          logger.debug(`[${tag}] Requested quality: ${requestedQuality}`);
+        // Filter items with video
+        const videoItems = items.filter(item => item.type?.includes('video') || item.height);
 
-          // Try to find exact quality match
-          let selectedFormat = videoFormats.find(f => f.qualityLabel === requestedQuality);
+        if (videoItems.length > 0) {
+          // Try to find exact quality match by height
+          let selectedItem = videoItems.find(item => item.height === requestedHeight);
 
           // If not found, get closest or best quality
-          if (!selectedFormat) {
-            videoFormats.sort((a, b) => {
-              const heightA = parseInt(a.qualityLabel) || 0;
-              const heightB = parseInt(b.qualityLabel) || 0;
-              return heightB - heightA;
-            });
-            selectedFormat = videoFormats[0];
-            logger.debug(`[${tag}] Using fallback quality: ${selectedFormat.qualityLabel}`);
+          if (!selectedItem) {
+            // Sort by height descending (best quality first)
+            videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
+            selectedItem = videoItems[0];
+            logger.debug(`[${tag}] Using fallback quality: ${selectedItem.height}p (${selectedItem.label})`);
+          } else {
+            logger.debug(`[${tag}] Found exact match: ${selectedItem.height}p (${selectedItem.label})`);
           }
 
-          downloadUrl = selectedFormat.url;
+          downloadUrl = selectedItem.url;
         }
       }
 
       if (!downloadUrl) {
-        // Log the actual structure for debugging
         logger.error(`[${tag}] vidfly.ai response structure: ${JSON.stringify(data, null, 2).substring(0, 500)}`);
         throw new Error('No suitable download link found');
       }
