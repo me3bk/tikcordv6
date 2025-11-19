@@ -84,9 +84,13 @@ class VideoDownloader {
       const args = [
         url,
         '--dump-json',
-        '--no-warnings',
         '--socket-timeout', '30'
       ];
+
+      // Add verbose for TikTok debugging
+      if (platform === 'tiktok') {
+        args.push('--verbose');
+      }
 
       // Skip impersonate - not supported by this yt-dlp build
       // Skip cookies for TikTok (works without them)
@@ -99,7 +103,7 @@ class VideoDownloader {
       }
 
       // Log the exact command for debugging
-      logger.debug(`[${tag}] yt-dlp command: yt-dlp ${args.join(' ')}`);
+      logger.info(`[${tag}] yt-dlp info command: yt-dlp ${args.join(' ')}`);
 
       const { stdout } = await promiseTimeout(
         execFileAsync('yt-dlp', args, {
@@ -212,15 +216,20 @@ class VideoDownloader {
 
       // Execute yt-dlp
       let lastYtDlpError = '';
+      let allStderr = '';
+      let allStdout = '';
+
       const ytDlp = execFile('yt-dlp', args, {
         timeout: CONFIG.DOWNLOAD.TIMEOUT,
         maxBuffer: CONFIG.DOWNLOAD.MAX_BUFFER_SIZE
       });
-      
+
       // Handle progress updates
       let lastProgress = 0;
       ytDlp.stdout.on('data', (data) => {
         const output = data.toString();
+        allStdout += output; // Capture everything
+
         const progressMatch = output.match(/\[(\d+\.?\d*)%\]/);
         if (progressMatch && onProgress) {
           const progress = parseFloat(progressMatch[1]);
@@ -230,35 +239,66 @@ class VideoDownloader {
           }
         }
       });
-      
-      // Log errors but don't fail
+
+      // Capture ALL stderr output
       ytDlp.stderr.on('data', (data) => {
         const errorText = data.toString();
+        allStderr += errorText; // Capture everything
+
         const trimmed = errorText.trim();
         if (trimmed) {
           lastYtDlpError = trimmed;
+
+          // Log ALL stderr for debugging (especially TikTok)
+          if (platform === 'tiktok') {
+            logger.info(`[${tag}] yt-dlp output: ${trimmed}`);
+          }
         }
+
         if (errorText.includes('ERROR')) {
-          logger.error(`[${tag}] yt-dlp error:`, { error: trimmed || errorText });
+          logger.error(`[${tag}] yt-dlp ERROR:`, { error: trimmed });
         }
       });
-      
+
       // Wait for completion
       await new Promise((resolve, reject) => {
         ytDlp.on('close', (code) => {
           if (code === 0) {
             resolve();
           } else {
+            // Build detailed error with ALL captured output
             const message = this.buildYtDlpErrorMessage(code, lastYtDlpError);
             const err = new Error(message);
+
             if (this.isPermanentYtDlpError(lastYtDlpError)) {
               err.isPermanent = true;
             }
+
             err.rawOutput = lastYtDlpError;
+            err.exitCode = code;
+            err.fullStderr = allStderr;
+            err.fullStdout = allStdout;
+
+            // Log FULL details for debugging
+            logger.error(`[${tag}] yt-dlp failed with exit code ${code}`);
+            logger.error(`[${tag}] Last error: ${lastYtDlpError || 'none'}`);
+            logger.error(`[${tag}] Full stderr (last 500 chars): ${allStderr.slice(-500) || 'none'}`);
+            if (allStdout) {
+              logger.debug(`[${tag}] Full stdout (last 200 chars): ${allStdout.slice(-200)}`);
+            }
+
             reject(err);
           }
         });
-        ytDlp.on('error', reject);
+
+        ytDlp.on('error', (err) => {
+          logger.error(`[${tag}] yt-dlp process error:`, {
+            error: err.message,
+            code: err.code,
+            stderr: allStderr.slice(-500) || 'none'
+          });
+          reject(err);
+        });
       });
       
       // Verify file exists and has content
@@ -369,7 +409,6 @@ class VideoDownloader {
 
     const baseArgs = [
       '--format', formatString,
-      '--no-warnings',
       '--no-playlist',
       '--socket-timeout', '60',
       '--retries', '10',
@@ -383,11 +422,12 @@ class VideoDownloader {
     ];
 
     // Skip impersonate - not supported by this yt-dlp build
-    
+
     // Platform-specific arguments
     switch (platform) {
       case 'tiktok':
         baseArgs.push(
+          '--verbose',  // ✅ Enable verbose output for debugging
           '--referer', 'https://www.tiktok.com/',
           '--no-check-certificates',
           '--http-chunk-size', '10M'
