@@ -1,14 +1,14 @@
 {
   "name": "tikcord-reborn-enhanced",
-  "version": "3.1.0",
-  "description": "Multi-platform Discord bot with maximum quality downloads - Refactored Edition",
+  "version": "4.0.0",
+  "description": "Multi-platform Discord bot optimized for 1GB RAM servers - Enhanced Edition",
   "main": "src/bot.js",
   "type": "commonjs",
   "scripts": {
     "prestart": "node scripts/deploy-commands.js",
-    "start": "node src/bot.js",
+    "start": "node --max-old-space-size=768 --expose-gc src/bot.js",
     "prestart:dev": "node scripts/deploy-commands.js",
-    "start:dev": "node --expose-gc src/bot.js",
+    "start:dev": "node --max-old-space-size=768 --expose-gc src/bot.js",
     "test": "node src/utils/healthCheck.js",
     "deploy:commands": "node scripts/deploy-commands.js"
   },

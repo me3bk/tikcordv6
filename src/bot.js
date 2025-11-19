@@ -18,6 +18,9 @@ const videoDownloader = require('./services/videoDownloader');
 const uploadService = require('./services/uploadService');
 const systemService = require('./services/systemService');
 const persistenceService = require('./services/persistenceService');
+const youtubeService = require('./services/youtubeService');
+const memoryGuard = require('./utils/memoryGuard');
+const diskGuard = require('./utils/diskGuard');
 
 // Validate configuration
 try {
@@ -344,10 +347,15 @@ client.once('ready', async () => {
   scheduleYtDlpUpdates();
   scheduleHealthCheck();
   scheduleCleanup();
-  
+
+  // Start resource guards for 1GB RAM server
+  memoryGuard.start(downloadManager, videoDownloader);
+  diskGuard.start(videoDownloader);
+
   await uploadService.sendAdminNotification(
     `🚀 Bot started successfully\n` +
-    `**Version:** 3.2.0 (Final)\n` +
+    `**Version:** 4.0.0 (Optimized)\n` +
+    `**Server:** 1GB RAM / 20GB Storage\n` +
     `**Time:** ${new Date().toLocaleString()}\n` +
     `**yt-dlp:** ${hasYtDlp ? 'Available' : 'Not found'}`
   );
@@ -394,14 +402,42 @@ client.on('messageCreate', async (message) => {
   // Process each unique URL
   for (const { url, platform } of urlsToProcess) {
     try {
-      // Create reply for this URL
+      // Special handling for YouTube - show quality selection
+      if (platform === 'youtube') {
+        const tag = downloadManager.generateTag();
+        const buttons = youtubeService.createQualityButtons(url, tag);
+
+        const selectionEmbed = new EmbedBuilder()
+          .setColor(0xFF0000)
+          .setTitle('▶️ YouTube - اختر الجودة أو الصيغة')
+          .setDescription(
+            `🎵 **MP3**: صوت فقط (3-5 MB)\n` +
+            `📹 **720p**: جودة عالية HD\n` +
+            `🎬 **1080p**: جودة كاملة Full HD\n` +
+            `📺 **1440p**: جودة 2K\n` +
+            `🎞️ **4K**: أعلى جودة 2160p\n` +
+            `⭐ **أفضل جودة**: أفضل ما هو متاح\n\n` +
+            `⏱️ *تنتهي الصلاحية بعد دقيقة واحدة*`
+          )
+          .setTimestamp();
+
+        await message.reply({
+          embeds: [selectionEmbed],
+          components: buttons
+        });
+
+        botState.stopProcessing(url); // Will be re-added when button is clicked
+        continue;
+      }
+
+      // For other platforms - proceed normally
       const replyEmbed = new EmbedBuilder()
         .setColor(0x3498DB)
         .setDescription(`${getPlatformEmoji(platform)} **Queued for download...**`)
         .setTimestamp();
-      
+
       const replyMessage = await message.reply({ embeds: [replyEmbed] });
-      
+
       // Add to download queue
       const added = downloadManager.addToQueue({
         url,
@@ -413,19 +449,19 @@ client.on('messageCreate', async (message) => {
         channelId: message.channel.id,
         guildId: message.guild?.id
       });
-      
+
       if (!added) {
         // Queue is full
         botState.stopProcessing(url);
-        
+
         const errorEmbed = new EmbedBuilder()
           .setColor(0xE74C3C)
           .setDescription(`${EMOJIS.error} **Queue is full. Please try again later.**`)
           .setTimestamp();
-        
+
         await replyMessage.edit({ embeds: [errorEmbed] });
       }
-      
+
     } catch (error) {
       logger.error(`Failed to process URL ${url}:`, { error: error.message });
       botState.stopProcessing(url);
@@ -440,6 +476,72 @@ client.on('error', (error) => {
 // ============= Command Handler =============
 
 client.on('interactionCreate', async (interaction) => {
+  // Handle YouTube quality selection buttons
+  if (interaction.isButton()) {
+    const selection = youtubeService.parseButtonInteraction(interaction.customId);
+
+    if (!selection) {
+      await interaction.reply({
+        content: '❌ انتهت صلاحية هذا الاختيار. أرسل الرابط مرة أخرى.',
+        ephemeral: true
+      });
+      return;
+    }
+
+    const { tag, url, quality, isAudio } = selection;
+    const formatOptions = youtubeService.getFormatOptions(quality);
+
+    await interaction.deferReply();
+
+    try {
+      // Create initial status message
+      const statusEmbed = new EmbedBuilder()
+        .setColor(0xFF0000)
+        .setDescription(`▶️ **جاري التحميل:** ${formatOptions.description}...`)
+        .setTimestamp();
+
+      const statusMessage = await interaction.followUp({ embeds: [statusEmbed] });
+
+      // Add to queue with YouTube-specific options
+      const added = downloadManager.addToQueue({
+        url,
+        message: statusMessage,
+        messageId: statusMessage.id,
+        platform: 'youtube',
+        userId: interaction.user.id,
+        authorId: interaction.user.id,
+        channelId: interaction.channel.id,
+        guildId: interaction.guild?.id,
+        youtubeOptions: {
+          quality,
+          isAudio,
+          formatOptions
+        }
+      });
+
+      if (!added) {
+        const errorEmbed = new EmbedBuilder()
+          .setColor(0xE74C3C)
+          .setDescription(`${EMOJIS.error} **الطابور ممتلئ. حاول مرة أخرى لاحقاً.**`)
+          .setTimestamp();
+
+        await statusMessage.edit({ embeds: [errorEmbed] });
+      }
+
+      // Delete selection message
+      await interaction.message.delete().catch(() => {});
+
+    } catch (error) {
+      logger.error(`YouTube button interaction failed:`, { error: error.message });
+      await interaction.followUp({
+        content: '❌ حدث خطأ. حاول مرة أخرى.',
+        ephemeral: true
+      });
+    }
+
+    return;
+  }
+
   if (!interaction.isCommand()) return;
   
   const { commandName } = interaction;

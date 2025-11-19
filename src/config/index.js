@@ -14,15 +14,18 @@ const CONFIG = {
       .filter(Boolean)
   },
 
-  // Download Settings - ✅ ENHANCED FOR MAXIMUM QUALITY
+  // Download Settings - ✅ OPTIMIZED FOR 1GB RAM SERVER
   DOWNLOAD: {
-    MAX_CONCURRENT: parseInt(process.env.MAX_CONCURRENT) || 5,
-    MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 7, // ✅ Increased default to 7
+    MAX_CONCURRENT: parseInt(process.env.MAX_CONCURRENT) || 2, // ✅ Reduced for low RAM
+    MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 7,
     MAX_QUEUE_SIZE: parseInt(process.env.MAX_QUEUE_SIZE) || 50,
-    TIMEOUT: 600000, // ✅ 10 minutes (increased from 5)
-    INFO_TIMEOUT: 60000, // ✅ 60 seconds (increased from 45)
-    MAX_BUFFER_SIZE: 500 * 1024 * 1024, // ✅ 500MB (increased from 150MB)
-    STUCK_DETECTION_TIME: 30000 // 30 seconds
+    TIMEOUT: 600000, // 10 minutes
+    INFO_TIMEOUT: 60000, // 60 seconds
+    MAX_BUFFER_SIZE: 50 * 1024 * 1024, // ✅ 50MB (optimized for 1GB RAM)
+    STUCK_DETECTION_TIME: 30000, // 30 seconds
+    STREAM_THRESHOLD_MB: 25, // ✅ Stream files smaller than 25MB
+    CLEANUP_AFTER_UPLOAD: true, // ✅ Delete immediately after upload
+    MAX_TEMP_SIZE_MB: 500 // ✅ Maximum temp directory size
   },
 
   // System Settings

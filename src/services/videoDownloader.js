@@ -152,17 +152,17 @@ class VideoDownloader {
    * @returns {Object} Download result
    */
   async downloadVideo(url, options = {}) {
-    const { tag = 'unknown', onProgress, retries = 0 } = options;
+    const { tag = 'unknown', onProgress, retries = 0, youtubeOptions } = options;
     const platform = detectPlatform(url);
-    
+
     logger.info(`[${tag}] Starting download from ${platform}...`);
-    
+
     if (retries > 0) {
       return await this.downloadWithRetry(url, options);
     }
-    
+
     await this.ensureTempDir();
-    
+
     let outPath = null;
     
     try {
@@ -174,20 +174,38 @@ class VideoDownloader {
       let caption = shortenText(metadata.description || metadata.title || null, 200);
 
       const dateTag = getDateTag();
-      const fileName = `${username}_${dateTag}_${tag}.mp4`;
-      outPath = path.join(this.tempDir, fileName);
-      
-      logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
 
-      // Get platform-specific arguments
-      const platformArgs = this.getPlatformArgs(platform, url);
-      const args = [
-        url,
-        ...platformArgs,
-        '-o', outPath,
-        '--progress',
-        '--newline'
-      ];
+      // Use youtubeService for YouTube custom downloads
+      let args;
+      let fileExt = 'mp4';
+
+      if (platform === 'youtube' && youtubeOptions && youtubeOptions.formatOptions) {
+        const youtubeService = require('./youtubeService');
+        const { formatOptions } = youtubeOptions;
+        fileExt = formatOptions.ext || 'mp4';
+
+        const fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
+        outPath = path.join(this.tempDir, fileName);
+
+        logger.info(`[${tag}] Downloading YouTube with ${formatOptions.description}: ${fileName}`);
+
+        args = youtubeService.buildYtDlpArgs(url, outPath, formatOptions);
+      } else {
+        const fileName = `${username}_${dateTag}_${tag}.mp4`;
+        outPath = path.join(this.tempDir, fileName);
+
+        logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
+
+        // Get platform-specific arguments
+        const platformArgs = this.getPlatformArgs(platform, url);
+        args = [
+          url,
+          ...platformArgs,
+          '-o', outPath,
+          '--progress',
+          '--newline'
+        ];
+      }
 
       // Log the exact command for debugging
       logger.debug(`[${tag}] yt-dlp download command: yt-dlp ${args.join(' ')}`);
@@ -359,8 +377,8 @@ class VideoDownloader {
       '--add-header', 'Accept:*/*',
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--merge-output-format', 'mp4',
-      '--concurrent-fragments', platform === 'snapchat' ? '3' : '16',
-      '--buffer-size', '16K',
+      '--concurrent-fragments', platform === 'snapchat' ? '3' : '32', // ✅ Increased for 1Gbps
+      '--buffer-size', '32K', // ✅ Larger buffer for fast network
       '--no-part'
     ];
 
@@ -607,16 +625,18 @@ class VideoDownloader {
       const files = await fs.readdir(this.tempDir);
       const now = Date.now();
       const maxAge = maxAgeHours * 60 * 60 * 1000;
-      
+
       let cleaned = 0;
-      
+      let freedBytes = 0;
+
       for (const file of files) {
         const filePath = path.join(this.tempDir, file);
         try {
           const stats = await fs.stat(filePath);
           const age = now - stats.mtimeMs;
-          
+
           if (age > maxAge) {
+            freedBytes += stats.size;
             await fs.unlink(filePath);
             cleaned++;
           }
@@ -625,13 +645,85 @@ class VideoDownloader {
           continue;
         }
       }
-      
+
       if (cleaned > 0) {
-        logger.info(`Cleaned up ${cleaned} old temporary files`);
+        const freedMB = (freedBytes / 1024 / 1024).toFixed(1);
+        logger.info(`🧹 Cleaned up ${cleaned} files (${freedMB}MB freed)`);
       }
-      
+
     } catch (error) {
       logger.error(`Cleanup failed:`, { error: error.message });
+    }
+  }
+
+  /**
+   * Aggressive cleanup based on total size
+   * Deletes oldest files if total temp size exceeds limit
+   */
+  async aggressiveCleanup() {
+    try {
+      await this.ensureTempDir();
+      const files = await fs.readdir(this.tempDir);
+      const now = Date.now();
+
+      let totalSize = 0;
+      const fileStats = [];
+
+      // Get all files with stats
+      for (const file of files) {
+        const filePath = path.join(this.tempDir, file);
+        try {
+          const stats = await fs.stat(filePath);
+          totalSize += stats.size;
+          fileStats.push({
+            path: filePath,
+            size: stats.size,
+            mtime: stats.mtimeMs,
+            name: file
+          });
+        } catch (error) {
+          continue;
+        }
+      }
+
+      const totalSizeMB = totalSize / 1024 / 1024;
+      const maxSizeMB = CONFIG.DOWNLOAD.MAX_TEMP_SIZE_MB || 500;
+
+      // If exceeds limit, delete oldest files
+      if (totalSizeMB > maxSizeMB) {
+        logger.warn(`⚠️ Temp dir too large: ${totalSizeMB.toFixed(1)}MB / ${maxSizeMB}MB`);
+
+        // Sort by modification time (oldest first)
+        fileStats.sort((a, b) => a.mtime - b.mtime);
+
+        let deletedCount = 0;
+        let freedBytes = 0;
+
+        for (const { path: filePath, size, name } of fileStats) {
+          try {
+            await fs.unlink(filePath);
+            totalSize -= size;
+            freedBytes += size;
+            deletedCount++;
+
+            logger.debug(`Deleted old file: ${name} (${(size/1024/1024).toFixed(1)}MB)`);
+
+            // Stop when under 70% of limit
+            if (totalSize / 1024 / 1024 < maxSizeMB * 0.7) {
+              break;
+            }
+          } catch (error) {
+            // Continue if can't delete
+            continue;
+          }
+        }
+
+        const freedMB = (freedBytes / 1024 / 1024).toFixed(1);
+        logger.info(`🧹 Aggressive cleanup: ${deletedCount} files deleted (${freedMB}MB freed)`);
+      }
+
+    } catch (error) {
+      logger.error(`Aggressive cleanup failed:`, { error: error.message });
     }
   }
 
