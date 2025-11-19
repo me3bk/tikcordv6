@@ -182,20 +182,21 @@ class VideoDownloader {
       // Use youtubeService for YouTube custom downloads
       let args;
       let fileExt = 'mp4';
+      let fileName; // Declare fileName in function scope
 
       if (platform === 'youtube' && youtubeOptions && youtubeOptions.formatOptions) {
         const youtubeService = require('./youtubeService');
         const { formatOptions } = youtubeOptions;
         fileExt = formatOptions.ext || 'mp4';
 
-        const fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
+        fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
         outPath = path.join(this.tempDir, fileName);
 
         logger.info(`[${tag}] Downloading YouTube with ${formatOptions.description}: ${fileName}`);
 
         args = youtubeService.buildYtDlpArgs(url, outPath, formatOptions);
       } else {
-        const fileName = `${username}_${dateTag}_${tag}.mp4`;
+        fileName = `${username}_${dateTag}_${tag}.mp4`;
         outPath = path.join(this.tempDir, fileName);
 
         logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
