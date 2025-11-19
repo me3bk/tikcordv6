@@ -1,7 +1,7 @@
 // constants/index.js - Application constants
 const PLATFORM_PATTERNS = {
   tiktok: /(?:https?:\/\/)?(?:www\.|vm\.|vt\.)?tiktok\.com\/(?:@[\w\.\-]+\/video\/\d+|[@\w\-\.\/]+)/gi,
-  instagram: /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv)\/[\w\-]+/gi,
+  instagram: /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv|stories)\/[\w\-]+(?:\/[\w\-]+)?/gi,
   twitter: /(?:https?:\/\/)?(?:www\.|mobile\.)?(?:twitter|x)\.com\/\w+\/status\/\d+/gi,
   youtube: /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:shorts\/|watch\?v=)|youtu\.be\/)[\w\-]+/gi,
   snapchat: /(?:https?:\/\/)?(?:www\.)?snapchat\.com\/(?:add\/[\w\.\-]+\/[A-Za-z0-9_\-]+|t\/[\w\-]+|spotlight\/[\w\-]+)(?:\?[^\s]*)?/gi,
