@@ -369,6 +369,9 @@ class VideoDownloader {
       if (platform === 'tiktok') {
         logger.info(`[${tag}] 🔄 Switching to TikTok API fallback...`);
         return await this.downloadTikTokViaAPI(url, options);
+      } else if (platform === 'youtube') {
+        logger.info(`[${tag}] 🔄 Switching to YouTube API fallback...`);
+        return await this.downloadYouTubeViaAPI(url, options);
       } else if (platform === 'instagram' && CONFIG.API.RAPIDAPI_KEY) {
         logger.info(`[${tag}] 🔄 Switching to Instagram API fallback...`);
         return await this.downloadInstagramViaAPI(url, options);
@@ -402,6 +405,13 @@ class VideoDownloader {
         } catch (apiError) {
           logger.error(`[${tag}] All download methods failed`);
           throw error; // Throw original error
+        }
+      } else if (platform === 'youtube') {
+        try {
+          return await this.downloadYouTubeViaAPI(url, options);
+        } catch (apiError) {
+          logger.error(`[${tag}] All download methods failed`);
+          throw error;
         }
       } else if (platform === 'instagram' && CONFIG.API.RAPIDAPI_KEY) {
         try {
@@ -570,10 +580,166 @@ class VideoDownloader {
       }
       
       throw new Error('TikTok API returned invalid response');
-      
+
     } catch (error) {
       const apiError = this.normalizeApiError(error, 'TikTok API fallback failed');
       logger.error(`[${tag}] TikTok API fallback failed:`, { error: apiError.message });
+      throw apiError;
+    }
+  }
+
+  /**
+   * Download YouTube via API fallback (cobalt.tools)
+   * @param {string} url - YouTube URL
+   * @param {Object} options - Download options
+   * @returns {Object} Download result
+   */
+  async downloadYouTubeViaAPI(url, options = {}) {
+    const { tag = 'unknown', youtubeOptions } = options;
+
+    try {
+      logger.info(`[${tag}] 🔄 Trying YouTube API fallback (cobalt.tools)...`);
+
+      // Determine quality preference
+      let quality = '1080';
+      let isAudioOnly = false;
+
+      if (youtubeOptions && youtubeOptions.quality) {
+        const qualityMap = {
+          'audio': { quality: 'max', audioOnly: true },
+          '720p': { quality: '720' },
+          '1080p': { quality: '1080' },
+          '1440p': { quality: '1440' },
+          '2160p': { quality: '2160' },
+          'best': { quality: 'max' }
+        };
+
+        const mapped = qualityMap[youtubeOptions.quality] || { quality: '1080' };
+        quality = mapped.quality;
+        isAudioOnly = mapped.audioOnly || false;
+      }
+
+      const response = await axios.post('https://co.wuk.sh/api/json', {
+        url: url,
+        vQuality: quality,
+        isAudioOnly: isAudioOnly,
+        filenamePattern: 'basic',
+        downloadMode: 'auto'
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        timeout: 60000
+      });
+
+      if (response.data.status === 'redirect' && response.data.url) {
+        const videoUrl = response.data.url;
+        const filename = response.data.filename || 'video';
+
+        const dateTag = getDateTag();
+        const ext = isAudioOnly ? 'mp3' : 'mp4';
+        const fileName = `${sanitizeFilename(filename)}_${dateTag}_${tag}.${ext}`;
+        const outPath = path.join(this.tempDir, fileName);
+
+        await this.ensureTempDir();
+
+        // Download video/audio file
+        logger.info(`[${tag}] Downloading from YouTube API: ${fileName}`);
+
+        const writer = fsSync.createWriteStream(outPath);
+        const videoResponse = await axios({
+          url: videoUrl,
+          method: 'GET',
+          responseType: 'stream',
+          timeout: CONFIG.DOWNLOAD.TIMEOUT,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+
+        videoResponse.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
+
+        // Verify download
+        if (!fsSync.existsSync(outPath)) {
+          throw new Error('YouTube API download failed - file not created');
+        }
+
+        const stats = fsSync.statSync(outPath);
+        if (stats.size === 0) {
+          throw new Error('YouTube API download failed - empty file');
+        }
+
+        logger.info(`[${tag}] ✅ Downloaded via YouTube API: ${fileName} (${(stats.size/1024/1024).toFixed(2)}MB)`);
+
+        return {
+          path: outPath,
+          size: stats.size,
+          filename: fileName,
+          platform: 'youtube',
+          metadata: {
+            uploader: 'youtube',
+            caption: null,
+            resolution: isAudioOnly ? 'audio' : quality + 'p'
+          }
+        };
+      } else if (response.data.status === 'stream' && response.data.url) {
+        // Handle stream response (similar to redirect)
+        const videoUrl = response.data.url;
+        const dateTag = getDateTag();
+        const ext = isAudioOnly ? 'mp3' : 'mp4';
+        const fileName = `youtube_${dateTag}_${tag}.${ext}`;
+        const outPath = path.join(this.tempDir, fileName);
+
+        await this.ensureTempDir();
+
+        logger.info(`[${tag}] Downloading from YouTube API: ${fileName}`);
+
+        const writer = fsSync.createWriteStream(outPath);
+        const videoResponse = await axios({
+          url: videoUrl,
+          method: 'GET',
+          responseType: 'stream',
+          timeout: CONFIG.DOWNLOAD.TIMEOUT,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+
+        videoResponse.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
+
+        const stats = fsSync.statSync(outPath);
+        logger.info(`[${tag}] ✅ Downloaded via YouTube API: ${fileName} (${(stats.size/1024/1024).toFixed(2)}MB)`);
+
+        return {
+          path: outPath,
+          size: stats.size,
+          filename: fileName,
+          platform: 'youtube',
+          metadata: {
+            uploader: 'youtube',
+            caption: null,
+            resolution: isAudioOnly ? 'audio' : quality + 'p'
+          }
+        };
+      }
+
+      throw new Error(`YouTube API error: ${response.data.text || 'Unknown error'}`);
+
+    } catch (error) {
+      const apiError = this.normalizeApiError(error, 'YouTube API fallback failed');
+      logger.error(`[${tag}] YouTube API fallback failed:`, { error: apiError.message });
       throw apiError;
     }
   }
