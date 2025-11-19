@@ -621,7 +621,8 @@ class VideoDownloader {
 
     // Try multiple APIs in order (only working APIs)
     const apis = [
-      { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) }
+      { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) },
+      { name: 'RapidAPI', fn: () => this.downloadYouTubeViaRapidAPI(url, tag, quality, isAudioOnly) }
       // yt5s.io, y2mate.nu, loader.to all return 404/400 errors - removed
     ];
 
@@ -662,10 +663,19 @@ class VideoDownloader {
         params: { url },
         headers: {
           'accept': '*/*',
+          'accept-language': 'en-US,en;q=0.9',
           'content-type': 'application/json',
+          'origin': 'https://vidfly.ai',
+          'referer': 'https://vidfly.ai/',
+          'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"',
+          'sec-fetch-dest': 'empty',
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'same-site',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
           'x-app-name': 'vidfly-web',
-          'x-app-version': '1.0.0',
-          'Referer': 'https://vidfly.ai/'
+          'x-app-version': '1.0.0'
         },
         timeout: 30000
       });
@@ -853,6 +863,202 @@ class VideoDownloader {
 
     } catch (error) {
       throw new Error(`vidfly.ai: ${error.message}`);
+    }
+  }
+
+  /**
+   * Download YouTube via RapidAPI
+   */
+  async downloadYouTubeViaRapidAPI(url, tag, quality, isAudioOnly) {
+    if (!CONFIG.API.RAPIDAPI_KEY) {
+      throw new Error('RapidAPI key not configured');
+    }
+
+    try {
+      // Extract video ID
+      const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
+      }
+
+      logger.info(`[${tag}] Fetching video info from RapidAPI...`);
+
+      // Try YouTube Media Downloader API
+      const response = await axios.get('https://youtube-media-downloader.p.rapidapi.com/v2/video/details', {
+        params: { videoId },
+        headers: {
+          'x-rapidapi-host': 'youtube-media-downloader.p.rapidapi.com',
+          'x-rapidapi-key': CONFIG.API.RAPIDAPI_KEY
+        },
+        timeout: 30000
+      });
+
+      if (!response.data || !response.data.videos) {
+        throw new Error('RapidAPI returned invalid response');
+      }
+
+      const data = response.data;
+      const title = data.title || 'video';
+      const videos = data.videos || [];
+
+      let downloadUrl;
+      const requestedHeight = parseInt(quality);
+
+      logger.debug(`[${tag}] RapidAPI available formats: ${videos.length}`);
+
+      if (isAudioOnly) {
+        // Try to find audio-only format
+        const audioFormats = videos.filter(v => v.type === 'audio' || v.mimeType?.includes('audio'));
+        if (audioFormats.length > 0) {
+          downloadUrl = audioFormats[0].url;
+        } else {
+          // Fallback to lowest quality video
+          videos.sort((a, b) => (a.height || 9999) - (b.height || 9999));
+          downloadUrl = videos[0].url;
+        }
+      } else {
+        // Find video with requested quality
+        const videoFormats = videos.filter(v => v.height && v.url);
+
+        // Try exact match
+        let selectedFormat = videoFormats.find(v => v.height === requestedHeight);
+
+        // Fallback to closest or best
+        if (!selectedFormat && videoFormats.length > 0) {
+          videoFormats.sort((a, b) => Math.abs(a.height - requestedHeight) - Math.abs(b.height - requestedHeight));
+          selectedFormat = videoFormats[0];
+          logger.debug(`[${tag}] Using closest quality: ${selectedFormat.height}p`);
+        }
+
+        if (selectedFormat) {
+          downloadUrl = selectedFormat.url;
+        }
+      }
+
+      if (!downloadUrl) {
+        throw new Error('No suitable download format found');
+      }
+
+      // Download the file
+      const dateTag = getDateTag();
+      const tempExt = 'mp4';
+      const finalExt = isAudioOnly ? 'mp3' : 'mp4';
+      const tempFileName = `${sanitizeFilename(title)}_${dateTag}_${tag}_temp.${tempExt}`;
+      const finalFileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${finalExt}`;
+      const tempPath = path.join(this.tempDir, tempFileName);
+      const finalPath = path.join(this.tempDir, finalFileName);
+
+      await this.ensureTempDir();
+
+      logger.info(`[${tag}] Downloading from RapidAPI: ${tempFileName}`);
+
+      const writer = fsSync.createWriteStream(tempPath);
+      const videoResponse = await axios({
+        url: downloadUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: CONFIG.DOWNLOAD.TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      videoResponse.data.pipe(writer);
+
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+
+      // Verify download
+      if (!fsSync.existsSync(tempPath)) {
+        throw new Error('Download failed - file not created');
+      }
+
+      const tempStats = fsSync.statSync(tempPath);
+      if (tempStats.size === 0) {
+        throw new Error('Download failed - empty file');
+      }
+
+      // If audio only, extract audio using ffmpeg
+      if (isAudioOnly) {
+        logger.info(`[${tag}] Extracting audio to MP3...`);
+
+        try {
+          const { execFile } = require('child_process');
+          const { promisify } = require('util');
+          const execFileAsync = promisify(execFile);
+
+          await execFileAsync('ffmpeg', [
+            '-i', tempPath,
+            '-vn', // No video
+            '-ar', '44100', // Audio sample rate
+            '-ac', '2', // Audio channels
+            '-b:a', '192k', // Audio bitrate
+            '-f', 'mp3',
+            finalPath
+          ], { timeout: 120000 });
+
+          // Delete temp video file
+          await fs.unlink(tempPath);
+
+          const finalStats = fsSync.statSync(finalPath);
+
+          logger.info(`[${tag}] ✅ Audio extracted: ${finalFileName} (${(finalStats.size/1024/1024).toFixed(2)}MB)`);
+
+          return {
+            path: finalPath,
+            size: finalStats.size,
+            filename: finalFileName,
+            platform: 'youtube',
+            metadata: {
+              uploader: data.author || 'youtube',
+              caption: data.description || null,
+              resolution: 'audio'
+            }
+          };
+
+        } catch (ffmpegError) {
+          logger.warn(`[${tag}] ffmpeg extraction failed, using video file: ${ffmpegError.message}`);
+
+          if (fsSync.existsSync(tempPath)) {
+            await fs.rename(tempPath, finalPath);
+          }
+
+          const fallbackStats = fsSync.statSync(finalPath);
+
+          return {
+            path: finalPath,
+            size: fallbackStats.size,
+            filename: finalFileName.replace('.mp3', '.mp4'),
+            platform: 'youtube',
+            metadata: {
+              uploader: data.author || 'youtube',
+              caption: data.description || null,
+              resolution: quality + 'p'
+            }
+          };
+        }
+      } else {
+        // Video download - just rename temp to final
+        await fs.rename(tempPath, finalPath);
+        const finalStats = fsSync.statSync(finalPath);
+
+        return {
+          path: finalPath,
+          size: finalStats.size,
+          filename: finalFileName,
+          platform: 'youtube',
+          metadata: {
+            uploader: data.author || 'youtube',
+            caption: data.description || null,
+            resolution: quality + 'p'
+          }
+        };
+      }
+
+    } catch (error) {
+      throw new Error(`RapidAPI: ${error.message}`);
     }
   }
 
