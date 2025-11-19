@@ -42,11 +42,15 @@ const QUALITY_BADGES = {
 };
 
 const FILE_HOSTS = {
-  GOFILE: {
-    name: 'GoFile.io',
-    maxSize: Infinity,
-    getServerUrl: 'https://api.gofile.io/getServer',
-    uploadUrlTemplate: 'https://{server}.gofile.io/uploadFile'
+  ZEROZEROEST: {
+    name: '0x0.st',
+    maxSize: 512 * 1024 * 1024, // 512MB
+    uploadUrl: 'https://0x0.st'
+  },
+  TMPFILES: {
+    name: 'tmpfiles.org',
+    maxSize: 100 * 1024 * 1024, // 100MB
+    uploadUrl: 'https://tmpfiles.org/api/v1/upload'
   },
   CATBOX: {
     name: 'Catbox.moe',

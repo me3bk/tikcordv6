@@ -694,47 +694,29 @@ class VideoDownloader {
         throw new Error('No items found in vidfly.ai response');
       }
 
-      // Find best quality video or audio based on request
+      // Find best quality video
       let downloadUrl;
+      const requestedHeight = parseInt(quality);
+      logger.debug(`[${tag}] Requested quality: ${quality}p (height: ${requestedHeight}), Audio only: ${isAudioOnly}`);
 
-      if (isAudioOnly) {
-        // Get audio items (type includes 'audio')
-        const audioItems = items.filter(item => item.type?.includes('audio') || item.ext === 'mp3');
-        logger.debug(`[${tag}] Found ${audioItems.length} audio items`);
+      // Filter items with video
+      const videoItems = items.filter(item => item.type?.includes('video') || item.height);
 
-        if (audioItems.length > 0) {
-          // Get first audio (usually best quality)
-          downloadUrl = audioItems[0].url;
-          logger.debug(`[${tag}] Selected audio: ${audioItems[0].label || 'unknown'}`);
+      if (videoItems.length > 0) {
+        // Try to find exact quality match by height
+        let selectedItem = videoItems.find(item => item.height === requestedHeight);
+
+        // If not found, get closest or best quality
+        if (!selectedItem) {
+          // Sort by height descending (best quality first)
+          videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
+          selectedItem = videoItems[0];
+          logger.debug(`[${tag}] Using fallback quality: ${selectedItem.height}p (${selectedItem.label})`);
         } else {
-          // Fallback: extract audio from video
-          downloadUrl = items[0].url;
-          logger.debug(`[${tag}] No audio-only, using video: ${items[0].label}`);
+          logger.debug(`[${tag}] Found exact match: ${selectedItem.height}p (${selectedItem.label})`);
         }
-      } else {
-        // Get video items with the requested quality
-        const requestedHeight = parseInt(quality);
-        logger.debug(`[${tag}] Requested quality: ${quality}p (height: ${requestedHeight})`);
 
-        // Filter items with video
-        const videoItems = items.filter(item => item.type?.includes('video') || item.height);
-
-        if (videoItems.length > 0) {
-          // Try to find exact quality match by height
-          let selectedItem = videoItems.find(item => item.height === requestedHeight);
-
-          // If not found, get closest or best quality
-          if (!selectedItem) {
-            // Sort by height descending (best quality first)
-            videoItems.sort((a, b) => (b.height || 0) - (a.height || 0));
-            selectedItem = videoItems[0];
-            logger.debug(`[${tag}] Using fallback quality: ${selectedItem.height}p (${selectedItem.label})`);
-          } else {
-            logger.debug(`[${tag}] Found exact match: ${selectedItem.height}p (${selectedItem.label})`);
-          }
-
-          downloadUrl = selectedItem.url;
-        }
+        downloadUrl = selectedItem.url;
       }
 
       if (!downloadUrl) {
@@ -744,15 +726,18 @@ class VideoDownloader {
 
       // Download the file
       const dateTag = getDateTag();
-      const ext = isAudioOnly ? 'mp3' : 'mp4';
-      const fileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${ext}`;
-      const outPath = path.join(this.tempDir, fileName);
+      const tempExt = 'mp4'; // Always download as MP4 first
+      const finalExt = isAudioOnly ? 'mp3' : 'mp4';
+      const tempFileName = `${sanitizeFilename(title)}_${dateTag}_${tag}_temp.${tempExt}`;
+      const finalFileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${finalExt}`;
+      const tempPath = path.join(this.tempDir, tempFileName);
+      const finalPath = path.join(this.tempDir, finalFileName);
 
       await this.ensureTempDir();
 
-      logger.info(`[${tag}] Downloading from vidfly.ai: ${fileName}`);
+      logger.info(`[${tag}] Downloading from vidfly.ai: ${tempFileName}`);
 
-      const writer = fsSync.createWriteStream(outPath);
+      const writer = fsSync.createWriteStream(tempPath);
       const videoResponse = await axios({
         url: downloadUrl,
         method: 'GET',
@@ -771,26 +756,100 @@ class VideoDownloader {
       });
 
       // Verify download
-      if (!fsSync.existsSync(outPath)) {
+      if (!fsSync.existsSync(tempPath)) {
         throw new Error('Download failed - file not created');
       }
 
-      const stats = fsSync.statSync(outPath);
-      if (stats.size === 0) {
+      const tempStats = fsSync.statSync(tempPath);
+      if (tempStats.size === 0) {
         throw new Error('Download failed - empty file');
       }
 
-      return {
-        path: outPath,
-        size: stats.size,
-        filename: fileName,
-        platform: 'youtube',
-        metadata: {
-          uploader: data.author || 'youtube',
-          caption: data.description || null,
-          resolution: isAudioOnly ? 'audio' : quality + 'p'
+      // If audio only, extract audio using ffmpeg
+      if (isAudioOnly) {
+        logger.info(`[${tag}] Extracting audio to MP3...`);
+
+        try {
+          const { execFile } = require('child_process');
+          const { promisify } = require('util');
+          const execFileAsync = promisify(execFile);
+
+          await execFileAsync('ffmpeg', [
+            '-i', tempPath,
+            '-vn', // No video
+            '-ar', '44100', // Audio sample rate
+            '-ac', '2', // Audio channels
+            '-b:a', '192k', // Audio bitrate
+            '-f', 'mp3',
+            finalPath
+          ], { timeout: 120000 });
+
+          // Delete temp video file
+          await fs.unlink(tempPath);
+
+          // Verify MP3 file
+          if (!fsSync.existsSync(finalPath)) {
+            throw new Error('MP3 extraction failed - file not created');
+          }
+
+          const finalStats = fsSync.statSync(finalPath);
+          if (finalStats.size === 0) {
+            throw new Error('MP3 extraction failed - empty file');
+          }
+
+          logger.info(`[${tag}] ✅ Audio extracted: ${finalFileName} (${(finalStats.size/1024/1024).toFixed(2)}MB)`);
+
+          return {
+            path: finalPath,
+            size: finalStats.size,
+            filename: finalFileName,
+            platform: 'youtube',
+            metadata: {
+              uploader: data.author || 'youtube',
+              caption: data.description || null,
+              resolution: 'audio'
+            }
+          };
+
+        } catch (ffmpegError) {
+          logger.warn(`[${tag}] ffmpeg extraction failed: ${ffmpegError.message}, using video file`);
+
+          // Clean up temp file if it still exists
+          if (fsSync.existsSync(tempPath)) {
+            await fs.rename(tempPath, finalPath);
+          }
+
+          const fallbackStats = fsSync.statSync(finalPath);
+
+          return {
+            path: finalPath,
+            size: fallbackStats.size,
+            filename: finalFileName.replace('.mp3', '.mp4'),
+            platform: 'youtube',
+            metadata: {
+              uploader: data.author || 'youtube',
+              caption: data.description || null,
+              resolution: quality + 'p'
+            }
+          };
         }
-      };
+      } else {
+        // Video download - just rename temp to final
+        await fs.rename(tempPath, finalPath);
+        const finalStats = fsSync.statSync(finalPath);
+
+        return {
+          path: finalPath,
+          size: finalStats.size,
+          filename: finalFileName,
+          platform: 'youtube',
+          metadata: {
+            uploader: data.author || 'youtube',
+            caption: data.description || null,
+            resolution: quality + 'p'
+          }
+        };
+      }
 
     } catch (error) {
       throw new Error(`vidfly.ai: ${error.message}`);
