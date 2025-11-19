@@ -182,20 +182,21 @@ class VideoDownloader {
       // Use youtubeService for YouTube custom downloads
       let args;
       let fileExt = 'mp4';
+      let fileName; // Declare fileName in function scope
 
       if (platform === 'youtube' && youtubeOptions && youtubeOptions.formatOptions) {
         const youtubeService = require('./youtubeService');
         const { formatOptions } = youtubeOptions;
         fileExt = formatOptions.ext || 'mp4';
 
-        const fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
+        fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
         outPath = path.join(this.tempDir, fileName);
 
         logger.info(`[${tag}] Downloading YouTube with ${formatOptions.description}: ${fileName}`);
 
         args = youtubeService.buildYtDlpArgs(url, outPath, formatOptions);
       } else {
-        const fileName = `${username}_${dateTag}_${tag}.mp4`;
+        fileName = `${username}_${dateTag}_${tag}.mp4`;
         outPath = path.join(this.tempDir, fileName);
 
         logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
@@ -264,6 +265,7 @@ class VideoDownloader {
       await new Promise((resolve, reject) => {
         ytDlp.on('close', (code) => {
           if (code === 0) {
+            logger.info(`[${tag}] yt-dlp process exited successfully (code 0)`);
             resolve();
           } else {
             // Build detailed error with ALL captured output
@@ -300,7 +302,9 @@ class VideoDownloader {
           reject(err);
         });
       });
-      
+
+      logger.debug(`[${tag}] Verifying downloaded file: ${outPath}`);
+
       // Verify file exists and has content
       if (!fsSync.existsSync(outPath)) {
         throw new Error('Downloaded file not found');
@@ -329,13 +333,20 @@ class VideoDownloader {
 
     } catch (error) {
       // Enhanced error logging to capture full details
-      const errorDetails = {
-        message: error.message || 'Unknown error',
-        isPermanent: error.isPermanent || false,
-        rawOutput: error.rawOutput || 'none',
-        code: error.code || 'N/A'
-      };
-      logger.error(`[${tag}] yt-dlp download failed:`, errorDetails);
+      logger.error(`[${tag}] yt-dlp download failed: ${error.message || 'Unknown error'}`);
+      logger.error(`[${tag}] Error code: ${error.code || error.exitCode || 'N/A'}`);
+      logger.error(`[${tag}] Is permanent: ${error.isPermanent || false}`);
+
+      // Log full stderr/stdout if available
+      if (error.fullStderr) {
+        logger.error(`[${tag}] Full stderr (last 1000 chars):\n${error.fullStderr.slice(-1000)}`);
+      }
+      if (error.fullStdout) {
+        logger.error(`[${tag}] Full stdout (last 500 chars):\n${error.fullStdout.slice(-500)}`);
+      }
+      if (error.rawOutput) {
+        logger.error(`[${tag}] Raw output: ${error.rawOutput}`);
+      }
       
       // Clean up failed download
       if (outPath && fsSync.existsSync(outPath)) {
