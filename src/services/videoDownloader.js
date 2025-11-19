@@ -621,6 +621,7 @@ class VideoDownloader {
 
     // Try multiple APIs in order
     const apis = [
+      { name: 'vidfly.ai', fn: () => this.downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) },
       { name: 'yt5s.io', fn: () => this.downloadYouTubeViaYt5s(url, tag, quality, isAudioOnly) },
       { name: 'y2mate.nu', fn: () => this.downloadYouTubeViaY2mate(url, tag, quality, isAudioOnly) }
     ];
@@ -644,6 +645,131 @@ class VideoDownloader {
     const apiError = this.normalizeApiError(lastError, 'All YouTube APIs failed');
     logger.error(`[${tag}] All YouTube APIs failed`);
     throw apiError;
+  }
+
+  /**
+   * Download YouTube via vidfly.ai API (fastest and most reliable)
+   */
+  async downloadYouTubeViaVidfly(url, tag, quality, isAudioOnly) {
+    try {
+      // Extract video ID
+      const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
+      }
+
+      // Get video data from vidfly.ai
+      const response = await axios.get('https://api.vidfly.ai/api/media/youtube/download', {
+        params: { url },
+        headers: {
+          'accept': '*/*',
+          'content-type': 'application/json',
+          'x-app-name': 'vidfly-web',
+          'x-app-version': '1.0.0',
+          'Referer': 'https://vidfly.ai/'
+        },
+        timeout: 30000
+      });
+
+      if (!response.data || !response.data.data) {
+        throw new Error('vidfly.ai returned invalid response');
+      }
+
+      const data = response.data.data;
+      const title = data.title || 'video';
+
+      // Find best quality video or audio based on request
+      let downloadUrl;
+
+      if (isAudioOnly) {
+        // Get audio stream
+        const audioFormats = data.formats?.filter(f => f.mimeType?.includes('audio')) || [];
+        if (audioFormats.length > 0) {
+          // Sort by bitrate descending
+          audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          downloadUrl = audioFormats[0].url;
+        }
+      } else {
+        // Get video stream with requested quality
+        const videoFormats = data.formats?.filter(f => f.mimeType?.includes('video') && f.qualityLabel) || [];
+
+        if (videoFormats.length > 0) {
+          const requestedQuality = quality + 'p';
+
+          // Try to find exact quality match
+          let selectedFormat = videoFormats.find(f => f.qualityLabel === requestedQuality);
+
+          // If not found, get closest or best quality
+          if (!selectedFormat) {
+            videoFormats.sort((a, b) => {
+              const heightA = parseInt(a.qualityLabel) || 0;
+              const heightB = parseInt(b.qualityLabel) || 0;
+              return heightB - heightA;
+            });
+            selectedFormat = videoFormats[0];
+          }
+
+          downloadUrl = selectedFormat.url;
+        }
+      }
+
+      if (!downloadUrl) {
+        throw new Error('No suitable download link found');
+      }
+
+      // Download the file
+      const dateTag = getDateTag();
+      const ext = isAudioOnly ? 'mp3' : 'mp4';
+      const fileName = `${sanitizeFilename(title)}_${dateTag}_${tag}.${ext}`;
+      const outPath = path.join(this.tempDir, fileName);
+
+      await this.ensureTempDir();
+
+      logger.info(`[${tag}] Downloading from vidfly.ai: ${fileName}`);
+
+      const writer = fsSync.createWriteStream(outPath);
+      const videoResponse = await axios({
+        url: downloadUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: CONFIG.DOWNLOAD.TIMEOUT,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      videoResponse.data.pipe(writer);
+
+      await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+
+      // Verify download
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error('Download failed - file not created');
+      }
+
+      const stats = fsSync.statSync(outPath);
+      if (stats.size === 0) {
+        throw new Error('Download failed - empty file');
+      }
+
+      return {
+        path: outPath,
+        size: stats.size,
+        filename: fileName,
+        platform: 'youtube',
+        metadata: {
+          uploader: data.author || 'youtube',
+          caption: data.description || null,
+          resolution: isAudioOnly ? 'audio' : quality + 'p'
+        }
+      };
+
+    } catch (error) {
+      throw new Error(`vidfly.ai: ${error.message}`);
+    }
   }
 
   /**
