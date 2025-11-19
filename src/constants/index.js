@@ -6,7 +6,11 @@ const PLATFORM_PATTERNS = {
   youtube: /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:shorts\/|watch\?v=)|youtu\.be\/)[\w\-]+/gi,
   snapchat: /(?:https?:\/\/)?(?:www\.)?snapchat\.com\/(?:add\/[\w\.\-]+\/[A-Za-z0-9_\-]+|t\/[\w\-]+|spotlight\/[\w\-]+)(?:\?[^\s]*)?/gi,
   facebook: /(?:https?:\/\/)?(?:www\.|m\.)?facebook\.com\/(?:watch\/\?v=|reel\/|share\/v\/)[\w\-]+/gi,
-  reddit: /(?:https?:\/\/)?(?:www\.)?reddit\.com\/r\/\w+\/comments\/[\w\/]+/gi
+  reddit: /(?:https?:\/\/)?(?:www\.)?reddit\.com\/r\/\w+\/comments\/[\w\/]+/gi,
+  twitch: /(?:https?:\/\/)?(?:www\.|clips\.)?twitch\.tv\/(?:\w+\/clip\/)?[\w\-]+/gi,
+  vimeo: /(?:https?:\/\/)?(?:www\.)?vimeo\.com\/\d+/gi,
+  dailymotion: /(?:https?:\/\/)?(?:www\.)?dailymotion\.com\/video\/[\w]+/gi,
+  threads: /(?:https?:\/\/)?(?:www\.)?threads\.net\/@[\w\.]+\/post\/[\w\-]+/gi
 };
 
 const EMOJIS = {
@@ -22,7 +26,11 @@ const EMOJIS = {
   twitter: '🐦',
   snapchat: '👻',
   facebook: '📘',
-  reddit: '🤖'
+  reddit: '🤖',
+  twitch: '🎮',
+  vimeo: '🎬',
+  dailymotion: '📺',
+  threads: '🧵'
 };
 
 const QUALITY_BADGES = {

@@ -84,9 +84,13 @@ class VideoDownloader {
       const args = [
         url,
         '--dump-json',
-        '--no-warnings',
         '--socket-timeout', '30'
       ];
+
+      // Add verbose for TikTok debugging
+      if (platform === 'tiktok') {
+        args.push('--verbose');
+      }
 
       // Skip impersonate - not supported by this yt-dlp build
       // Skip cookies for TikTok (works without them)
@@ -99,7 +103,7 @@ class VideoDownloader {
       }
 
       // Log the exact command for debugging
-      logger.debug(`[${tag}] yt-dlp command: yt-dlp ${args.join(' ')}`);
+      logger.info(`[${tag}] yt-dlp info command: yt-dlp ${args.join(' ')}`);
 
       const { stdout } = await promiseTimeout(
         execFileAsync('yt-dlp', args, {
@@ -152,17 +156,17 @@ class VideoDownloader {
    * @returns {Object} Download result
    */
   async downloadVideo(url, options = {}) {
-    const { tag = 'unknown', onProgress, retries = 0 } = options;
+    const { tag = 'unknown', onProgress, retries = 0, youtubeOptions } = options;
     const platform = detectPlatform(url);
-    
+
     logger.info(`[${tag}] Starting download from ${platform}...`);
-    
+
     if (retries > 0) {
       return await this.downloadWithRetry(url, options);
     }
-    
+
     await this.ensureTempDir();
-    
+
     let outPath = null;
     
     try {
@@ -174,35 +178,58 @@ class VideoDownloader {
       let caption = shortenText(metadata.description || metadata.title || null, 200);
 
       const dateTag = getDateTag();
-      const fileName = `${username}_${dateTag}_${tag}.mp4`;
-      outPath = path.join(this.tempDir, fileName);
-      
-      logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
 
-      // Get platform-specific arguments
-      const platformArgs = this.getPlatformArgs(platform, url);
-      const args = [
-        url,
-        ...platformArgs,
-        '-o', outPath,
-        '--progress',
-        '--newline'
-      ];
+      // Use youtubeService for YouTube custom downloads
+      let args;
+      let fileExt = 'mp4';
+
+      if (platform === 'youtube' && youtubeOptions && youtubeOptions.formatOptions) {
+        const youtubeService = require('./youtubeService');
+        const { formatOptions } = youtubeOptions;
+        fileExt = formatOptions.ext || 'mp4';
+
+        const fileName = `${username}_${dateTag}_${tag}.${fileExt}`;
+        outPath = path.join(this.tempDir, fileName);
+
+        logger.info(`[${tag}] Downloading YouTube with ${formatOptions.description}: ${fileName}`);
+
+        args = youtubeService.buildYtDlpArgs(url, outPath, formatOptions);
+      } else {
+        const fileName = `${username}_${dateTag}_${tag}.mp4`;
+        outPath = path.join(this.tempDir, fileName);
+
+        logger.info(`[${tag}] Downloading with yt-dlp: ${fileName}`);
+
+        // Get platform-specific arguments
+        const platformArgs = this.getPlatformArgs(platform, url);
+        args = [
+          url,
+          ...platformArgs,
+          '-o', outPath,
+          '--progress',
+          '--newline'
+        ];
+      }
 
       // Log the exact command for debugging
       logger.debug(`[${tag}] yt-dlp download command: yt-dlp ${args.join(' ')}`);
 
       // Execute yt-dlp
       let lastYtDlpError = '';
+      let allStderr = '';
+      let allStdout = '';
+
       const ytDlp = execFile('yt-dlp', args, {
         timeout: CONFIG.DOWNLOAD.TIMEOUT,
         maxBuffer: CONFIG.DOWNLOAD.MAX_BUFFER_SIZE
       });
-      
+
       // Handle progress updates
       let lastProgress = 0;
       ytDlp.stdout.on('data', (data) => {
         const output = data.toString();
+        allStdout += output; // Capture everything
+
         const progressMatch = output.match(/\[(\d+\.?\d*)%\]/);
         if (progressMatch && onProgress) {
           const progress = parseFloat(progressMatch[1]);
@@ -212,35 +239,66 @@ class VideoDownloader {
           }
         }
       });
-      
-      // Log errors but don't fail
+
+      // Capture ALL stderr output
       ytDlp.stderr.on('data', (data) => {
         const errorText = data.toString();
+        allStderr += errorText; // Capture everything
+
         const trimmed = errorText.trim();
         if (trimmed) {
           lastYtDlpError = trimmed;
+
+          // Log ALL stderr for debugging (especially TikTok)
+          if (platform === 'tiktok') {
+            logger.info(`[${tag}] yt-dlp output: ${trimmed}`);
+          }
         }
+
         if (errorText.includes('ERROR')) {
-          logger.error(`[${tag}] yt-dlp error:`, { error: trimmed || errorText });
+          logger.error(`[${tag}] yt-dlp ERROR:`, { error: trimmed });
         }
       });
-      
+
       // Wait for completion
       await new Promise((resolve, reject) => {
         ytDlp.on('close', (code) => {
           if (code === 0) {
             resolve();
           } else {
+            // Build detailed error with ALL captured output
             const message = this.buildYtDlpErrorMessage(code, lastYtDlpError);
             const err = new Error(message);
+
             if (this.isPermanentYtDlpError(lastYtDlpError)) {
               err.isPermanent = true;
             }
+
             err.rawOutput = lastYtDlpError;
+            err.exitCode = code;
+            err.fullStderr = allStderr;
+            err.fullStdout = allStdout;
+
+            // Log FULL details for debugging
+            logger.error(`[${tag}] yt-dlp failed with exit code ${code}`);
+            logger.error(`[${tag}] Last error: ${lastYtDlpError || 'none'}`);
+            logger.error(`[${tag}] Full stderr (last 500 chars): ${allStderr.slice(-500) || 'none'}`);
+            if (allStdout) {
+              logger.debug(`[${tag}] Full stdout (last 200 chars): ${allStdout.slice(-200)}`);
+            }
+
             reject(err);
           }
         });
-        ytDlp.on('error', reject);
+
+        ytDlp.on('error', (err) => {
+          logger.error(`[${tag}] yt-dlp process error:`, {
+            error: err.message,
+            code: err.code,
+            stderr: allStderr.slice(-500) || 'none'
+          });
+          reject(err);
+        });
       });
       
       // Verify file exists and has content
@@ -351,7 +409,6 @@ class VideoDownloader {
 
     const baseArgs = [
       '--format', formatString,
-      '--no-warnings',
       '--no-playlist',
       '--socket-timeout', '60',
       '--retries', '10',
@@ -359,17 +416,18 @@ class VideoDownloader {
       '--add-header', 'Accept:*/*',
       '--add-header', 'Accept-Language:en-US,en;q=0.9',
       '--merge-output-format', 'mp4',
-      '--concurrent-fragments', platform === 'snapchat' ? '3' : '16',
-      '--buffer-size', '16K',
+      '--concurrent-fragments', platform === 'snapchat' ? '3' : '32', // ✅ Increased for 1Gbps
+      '--buffer-size', '32K', // ✅ Larger buffer for fast network
       '--no-part'
     ];
 
     // Skip impersonate - not supported by this yt-dlp build
-    
+
     // Platform-specific arguments
     switch (platform) {
       case 'tiktok':
         baseArgs.push(
+          '--verbose',  // ✅ Enable verbose output for debugging
           '--referer', 'https://www.tiktok.com/',
           '--no-check-certificates',
           '--http-chunk-size', '10M'
@@ -607,16 +665,18 @@ class VideoDownloader {
       const files = await fs.readdir(this.tempDir);
       const now = Date.now();
       const maxAge = maxAgeHours * 60 * 60 * 1000;
-      
+
       let cleaned = 0;
-      
+      let freedBytes = 0;
+
       for (const file of files) {
         const filePath = path.join(this.tempDir, file);
         try {
           const stats = await fs.stat(filePath);
           const age = now - stats.mtimeMs;
-          
+
           if (age > maxAge) {
+            freedBytes += stats.size;
             await fs.unlink(filePath);
             cleaned++;
           }
@@ -625,13 +685,85 @@ class VideoDownloader {
           continue;
         }
       }
-      
+
       if (cleaned > 0) {
-        logger.info(`Cleaned up ${cleaned} old temporary files`);
+        const freedMB = (freedBytes / 1024 / 1024).toFixed(1);
+        logger.info(`🧹 Cleaned up ${cleaned} files (${freedMB}MB freed)`);
       }
-      
+
     } catch (error) {
       logger.error(`Cleanup failed:`, { error: error.message });
+    }
+  }
+
+  /**
+   * Aggressive cleanup based on total size
+   * Deletes oldest files if total temp size exceeds limit
+   */
+  async aggressiveCleanup() {
+    try {
+      await this.ensureTempDir();
+      const files = await fs.readdir(this.tempDir);
+      const now = Date.now();
+
+      let totalSize = 0;
+      const fileStats = [];
+
+      // Get all files with stats
+      for (const file of files) {
+        const filePath = path.join(this.tempDir, file);
+        try {
+          const stats = await fs.stat(filePath);
+          totalSize += stats.size;
+          fileStats.push({
+            path: filePath,
+            size: stats.size,
+            mtime: stats.mtimeMs,
+            name: file
+          });
+        } catch (error) {
+          continue;
+        }
+      }
+
+      const totalSizeMB = totalSize / 1024 / 1024;
+      const maxSizeMB = CONFIG.DOWNLOAD.MAX_TEMP_SIZE_MB || 500;
+
+      // If exceeds limit, delete oldest files
+      if (totalSizeMB > maxSizeMB) {
+        logger.warn(`⚠️ Temp dir too large: ${totalSizeMB.toFixed(1)}MB / ${maxSizeMB}MB`);
+
+        // Sort by modification time (oldest first)
+        fileStats.sort((a, b) => a.mtime - b.mtime);
+
+        let deletedCount = 0;
+        let freedBytes = 0;
+
+        for (const { path: filePath, size, name } of fileStats) {
+          try {
+            await fs.unlink(filePath);
+            totalSize -= size;
+            freedBytes += size;
+            deletedCount++;
+
+            logger.debug(`Deleted old file: ${name} (${(size/1024/1024).toFixed(1)}MB)`);
+
+            // Stop when under 70% of limit
+            if (totalSize / 1024 / 1024 < maxSizeMB * 0.7) {
+              break;
+            }
+          } catch (error) {
+            // Continue if can't delete
+            continue;
+          }
+        }
+
+        const freedMB = (freedBytes / 1024 / 1024).toFixed(1);
+        logger.info(`🧹 Aggressive cleanup: ${deletedCount} files deleted (${freedMB}MB freed)`);
+      }
+
+    } catch (error) {
+      logger.error(`Aggressive cleanup failed:`, { error: error.message });
     }
   }
 
