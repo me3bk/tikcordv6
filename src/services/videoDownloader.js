@@ -92,6 +92,14 @@ class VideoDownloader {
         args.push('--verbose');
       }
 
+      // Add YouTube bypass for bot detection
+      if (platform === 'youtube') {
+        args.push(
+          '--extractor-args', 'youtube:player_client=default,web',
+          '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        );
+      }
+
       // Skip impersonate - not supported by this yt-dlp build
       // Skip cookies for TikTok (works without them)
       if (platform !== 'tiktok') {
@@ -450,7 +458,12 @@ class VideoDownloader {
         break;
         
       case 'youtube':
-        baseArgs.push('--no-playlist', '--prefer-free-formats');
+        baseArgs.push(
+          '--no-playlist',
+          '--prefer-free-formats',
+          '--extractor-args', 'youtube:player_client=default,web',  // ✅ Bypass bot detection
+          '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        );
         break;
         
       case 'snapchat':

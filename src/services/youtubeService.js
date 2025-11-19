@@ -169,7 +169,10 @@ class YoutubeService {
       '--buffer-size', '32K',
       '--merge-output-format', formatOptions.ext,
       '--progress',
-      '--newline'
+      '--newline',
+      // ✅ Bypass YouTube bot detection
+      '--extractor-args', 'youtube:player_client=default,web',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     ];
 
     // Add audio extraction options if needed
