@@ -150,26 +150,31 @@ class UploadService {
    */
   async uploadToFileHost(message, filePath, filename, fileSize, metadata) {
     const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
-    
+
     logger.info(`[${metadata.tag}] File too large (${sizeMB}MB), uploading to file host...`);
-    
+
     try {
-      // Try GoFile first (no size limit)
-      let provider = 'GoFile.io';
-      let uploadUrl = await this.uploadToGoFile(filePath, filename, metadata);
-      
+      // Try 0x0.st first (512MB limit)
+      let provider = '0x0.st';
+      let uploadUrl = await this.uploadToZeroZeroEst(filePath, filename, fileSize, metadata);
+
+      if (!uploadUrl) {
+        provider = 'tmpfiles.org';
+        uploadUrl = await this.uploadToTmpfiles(filePath, filename, fileSize, metadata);
+      }
+
       if (!uploadUrl) {
         provider = 'Catbox.moe';
         uploadUrl = await this.uploadToCatbox(filePath, filename, fileSize, metadata);
       }
-      
+
       if (!uploadUrl) {
         throw new Error('All file host uploads failed');
       }
-      
+
       // Send link to Discord
       await this.sendFileHostLink(message, uploadUrl, sizeMB, metadata, provider);
-      
+
     } catch (error) {
       logger.error(`[${metadata.tag}] File host upload failed:`, { error: error.message });
       throw error;
@@ -177,41 +182,31 @@ class UploadService {
   }
 
   /**
-   * Upload to GoFile.io
+   * Upload to 0x0.st
    * @param {string} filePath - Path to file
    * @param {string} filename - Filename
+   * @param {number} fileSize - File size in bytes
    * @param {Object} metadata - File metadata
    * @returns {string|null} Upload URL or null
    */
-  async uploadToGoFile(filePath, filename, metadata) {
+  async uploadToZeroZeroEst(filePath, filename, fileSize, metadata) {
+    // Check file size limit
+    if (fileSize > FILE_HOSTS.ZEROZEROEST.maxSize) {
+      logger.warn(`[${metadata.tag}] File too large for 0x0.st (${formatBytes(fileSize)} > 512MB)`);
+      return null;
+    }
+
     try {
-      logger.info(`[${metadata.tag}] Uploading to GoFile.io...`);
-      
-      // Get upload server
-      const serverResponse = await promiseTimeout(
-        axios.get(FILE_HOSTS.GOFILE.getServerUrl),
-        15000,
-        'GoFile server request timed out'
-      );
-      
-      if (serverResponse.data.status !== 'ok') {
-        throw new Error('GoFile server not available');
-      }
-      
-      const server = serverResponse.data.data.server;
-      logger.info(`[${metadata.tag}] Using GoFile server: ${server}`);
-      
-      // Prepare form data
+      logger.info(`[${metadata.tag}] Uploading to 0x0.st...`);
+
       const form = new FormData();
       form.append('file', fsSync.createReadStream(filePath), {
         filename: filename,
         contentType: 'video/mp4'
       });
-      
-      // Upload file
-      const uploadUrl = FILE_HOSTS.GOFILE.uploadUrlTemplate.replace('{server}', server);
-      const uploadResponse = await promiseTimeout(
-        axios.post(uploadUrl, form, {
+
+      const response = await promiseTimeout(
+        axios.post(FILE_HOSTS.ZEROZEROEST.uploadUrl, form, {
           headers: {
             ...form.getHeaders()
           },
@@ -219,19 +214,71 @@ class UploadService {
           maxBodyLength: Infinity
         }),
         300000,
-        'GoFile upload timed out'
+        '0x0.st upload timed out'
       );
-      
-      if (uploadResponse.data.status === 'ok' && uploadResponse.data.data?.downloadPage) {
-        const downloadUrl = uploadResponse.data.data.downloadPage;
-        logger.info(`[${metadata.tag}] ✅ GoFile upload successful: ${downloadUrl}`);
+
+      if (response.data && response.data.trim().startsWith('https://')) {
+        const downloadUrl = response.data.trim();
+        logger.info(`[${metadata.tag}] ✅ 0x0.st upload successful: ${downloadUrl}`);
         return downloadUrl;
       }
-      
-      throw new Error('GoFile returned invalid response');
-      
+
+      throw new Error('0x0.st returned invalid response');
+
     } catch (error) {
-      logger.warn(`[${metadata.tag}] GoFile upload failed:`, { error: error.message });
+      logger.warn(`[${metadata.tag}] 0x0.st upload failed:`, { error: error.message });
+      return null;
+    }
+  }
+
+  /**
+   * Upload to tmpfiles.org
+   * @param {string} filePath - Path to file
+   * @param {string} filename - Filename
+   * @param {number} fileSize - File size in bytes
+   * @param {Object} metadata - File metadata
+   * @returns {string|null} Upload URL or null
+   */
+  async uploadToTmpfiles(filePath, filename, fileSize, metadata) {
+    // Check file size limit
+    if (fileSize > FILE_HOSTS.TMPFILES.maxSize) {
+      logger.warn(`[${metadata.tag}] File too large for tmpfiles.org (${formatBytes(fileSize)} > 100MB)`);
+      return null;
+    }
+
+    try {
+      logger.info(`[${metadata.tag}] Uploading to tmpfiles.org...`);
+
+      const form = new FormData();
+      form.append('file', fsSync.createReadStream(filePath), {
+        filename: filename,
+        contentType: 'video/mp4'
+      });
+
+      const response = await promiseTimeout(
+        axios.post(FILE_HOSTS.TMPFILES.uploadUrl, form, {
+          headers: {
+            ...form.getHeaders()
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }),
+        300000,
+        'tmpfiles.org upload timed out'
+      );
+
+      if (response.data && response.data.data && response.data.data.url) {
+        // tmpfiles.org returns URL in format: tmpfiles.org/dl/xxxxx
+        // We need to convert it to direct download link
+        const downloadUrl = response.data.data.url.replace('/dl/', '/');
+        logger.info(`[${metadata.tag}] ✅ tmpfiles.org upload successful: ${downloadUrl}`);
+        return downloadUrl;
+      }
+
+      throw new Error('tmpfiles.org returned invalid response');
+
+    } catch (error) {
+      logger.warn(`[${metadata.tag}] tmpfiles.org upload failed:`, { error: error.message });
       return null;
     }
   }
